@@ -1,32 +1,56 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using FractalTicTacToe.Core;
 
 namespace FractalTicTacToe.ConsoleApp
 {
+    public enum GameMode
+    {
+        HumanVsBotX = 1, // Humano (X) vs Bot (O)
+        BotVsHumanO = 2, // Bot (X) vs Humano (O)
+        HumanVsHuman = 3,
+        BotVsBot = 4
+    }
+
     public static class Program
     {
         public static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
 
+            GameMode mode = SelectGameMode(args, out int botDepth);
+            var bot = new MinimaxBot(botDepth);
+
             var state = new GameState();
             Move? lastMove = null;
-            string statusMessage = null;
+            string statusMessage = $"Modo activo: {GetModeDescription(mode, botDepth)}";
             bool isErrorMessage = false;
 
             while (true)
             {
-                RenderScreen(state, lastMove, statusMessage, isErrorMessage);
+                RenderScreen(state, lastMove, statusMessage, isErrorMessage, mode, botDepth);
                 statusMessage = null;
                 isErrorMessage = false;
 
                 if (state.IsGameOver)
                 {
                     RenderGameOverBanner(state);
-                    Console.Write("\n¿Desean jugar otra partida? (s/n): ");
+                    Console.Write("\n¿Desean jugar otra partida? (s = sí / m = cambiar modo / n = salir): ");
                     string retry = Console.ReadLine()?.Trim().ToLowerInvariant();
+
+                    if (retry == "m")
+                    {
+                        mode = SelectGameMode(Array.Empty<string>(), out botDepth);
+                        bot = new MinimaxBot(botDepth);
+                        state = new GameState();
+                        lastMove = null;
+                        statusMessage = $"Modo cambiado a: {GetModeDescription(mode, botDepth)}";
+                        continue;
+                    }
+
                     if (retry == "s" || retry == "si" || retry == "sí" || retry == "y")
                     {
                         state = new GameState();
@@ -36,6 +60,32 @@ namespace FractalTicTacToe.ConsoleApp
 
                     Console.WriteLine("¡Gracias por jugar Fractal Tic-Tac-Toe!");
                     break;
+                }
+
+                bool isBotTurn = IsBotTurn(state.CurrentPlayer, mode);
+
+                if (isBotTurn)
+                {
+                    ConsoleColor botColor = state.CurrentPlayer == Player.X ? ConsoleColor.Red : ConsoleColor.Blue;
+                    Console.WriteLine();
+                    WriteColored($"  [Bot Minimax ({state.CurrentPlayer})]", botColor);
+                    Console.WriteLine($" Calculando jugada óptima (Profundidad máx: {bot.MaxDepth})...");
+
+                    var sw = Stopwatch.StartNew();
+                    MinimaxSearchResult searchResult = bot.FindBestMove(state);
+                    sw.Stop();
+
+                    if (mode == GameMode.BotVsBot)
+                    {
+                        Thread.Sleep(250);
+                    }
+
+                    state.MakeMove(searchResult.BestMove);
+                    lastMove = searchResult.BestMove;
+                    statusMessage =
+                        $"Bot ({ (state.CurrentPlayer == Player.X ? Player.O : Player.X) }) jugó {searchResult.BestMove} | " +
+                        $"Eval: {searchResult.Score} | Nodos: {searchResult.NodesEvaluated:N0} | Tiempo: {sw.ElapsedMilliseconds} ms";
+                    continue;
                 }
 
                 RenderPrompt(state);
@@ -63,6 +113,28 @@ namespace FractalTicTacToe.ConsoleApp
                     continue;
                 }
 
+                if (string.Equals(trimmed, "m", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(trimmed, "modo", StringComparison.OrdinalIgnoreCase))
+                {
+                    mode = SelectGameMode(Array.Empty<string>(), out botDepth);
+                    bot = new MinimaxBot(botDepth);
+                    state = new GameState();
+                    lastMove = null;
+                    statusMessage = $"Modo cambiado a: {GetModeDescription(mode, botDepth)}";
+                    continue;
+                }
+
+                if (string.Equals(trimmed, "h", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(trimmed, "hint", StringComparison.OrdinalIgnoreCase))
+                {
+                    var sw = Stopwatch.StartNew();
+                    MinimaxSearchResult hint = bot.FindBestMove(state);
+                    sw.Stop();
+                    statusMessage =
+                        $"Sugerencia Minimax: {hint.BestMove} (Eval: {hint.Score}, {hint.NodesEvaluated:N0} nodos en {sw.ElapsedMilliseconds} ms)";
+                    continue;
+                }
+
                 if (!TryParseUserMove(trimmed, state, out Move move, out string parseError))
                 {
                     statusMessage = parseError;
@@ -81,6 +153,95 @@ namespace FractalTicTacToe.ConsoleApp
             }
         }
 
+        private static GameMode SelectGameMode(string[] args, out int botDepth)
+        {
+            botDepth = 6;
+
+            // Si la entrada estándar está redirigida (ej. pruebas automatizadas por pipe), mantener 2P por defecto
+            if (Console.IsInputRedirected && (args == null || args.Length == 0))
+            {
+                return GameMode.HumanVsHuman;
+            }
+
+            try
+            {
+                Console.Clear();
+            }
+            catch
+            {
+                // Ignorar si la consola está redirigida
+            }
+
+            WriteColoredLine("╔══════════════════════════════════════════════════════════════════════╗", ConsoleColor.Cyan);
+            WriteColoredLine("║          FRACTAL TIC-TAC-TOE  •  SELECCIÓN DE MODO DE JUEGO         ║", ConsoleColor.Cyan);
+            WriteColoredLine("╚══════════════════════════════════════════════════════════════════════╝", ConsoleColor.Cyan);
+            Console.WriteLine();
+            Console.WriteLine("  [1] Humano (X) vs. Bot Minimax (O)  [Recomendado]");
+            Console.WriteLine("  [2] Bot Minimax (X) vs. Humano (O)");
+            Console.WriteLine("  [3] Humano (X) vs. Humano (O)");
+            Console.WriteLine("  [4] Bot Minimax (X) vs. Bot Minimax (O)  [Simulación]");
+            Console.WriteLine();
+            Console.Write("  Selecciona una opción (1-4) [Por defecto: 1]: ");
+
+            string choice = Console.ReadLine()?.Trim();
+            GameMode selectedMode = GameMode.HumanVsBotX;
+
+            if (choice == "2")
+            {
+                selectedMode = GameMode.BotVsHumanO;
+            }
+            else if (choice == "3")
+            {
+                selectedMode = GameMode.HumanVsHuman;
+            }
+            else if (choice == "4")
+            {
+                selectedMode = GameMode.BotVsBot;
+            }
+
+            if (selectedMode != GameMode.HumanVsHuman)
+            {
+                Console.Write("  Profundidad de búsqueda del Bot Minimax (1-8) [Por defecto: 6]: ");
+                string depthInput = Console.ReadLine()?.Trim();
+                if (int.TryParse(depthInput, out int parsedDepth) && parsedDepth >= 1 && parsedDepth <= 8)
+                {
+                    botDepth = parsedDepth;
+                }
+            }
+
+            return selectedMode;
+        }
+
+        private static bool IsBotTurn(Player currentPlayer, GameMode mode)
+        {
+            switch (mode)
+            {
+                case GameMode.HumanVsBotX:
+                    return currentPlayer == Player.O;
+                case GameMode.BotVsHumanO:
+                    return currentPlayer == Player.X;
+                case GameMode.BotVsBot:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static string GetModeDescription(GameMode mode, int botDepth)
+        {
+            switch (mode)
+            {
+                case GameMode.HumanVsBotX:
+                    return $"Humano (X) vs. Bot Minimax (O) [Profundidad {botDepth}]";
+                case GameMode.BotVsHumanO:
+                    return $"Bot Minimax (X) [Profundidad {botDepth}] vs. Humano (O)";
+                case GameMode.BotVsBot:
+                    return $"Bot (X) vs. Bot (O) [Profundidad {botDepth}]";
+                default:
+                    return "Humano (X) vs. Humano (O)";
+            }
+        }
+
         private static bool TryParseUserMove(string input, GameState state, out Move move, out string error)
         {
             move = default;
@@ -94,7 +255,6 @@ namespace FractalTicTacToe.ConsoleApp
 
             string[] parts = input.Split(new[] { ' ', ',', '-', ':', '\t' }, StringSplitOptions.RemoveEmptyEntries);
 
-            // Si el tablero está forzado (0..8), permitimos ingresar solo la celda (1 número) o tablero y celda (2 números)
             if (parts.Length == 1 && state.ActiveBoardIndex != GameState.FreeMoveBoardIndex)
             {
                 if (!int.TryParse(parts[0], out int cellIndex) || cellIndex < 0 || cellIndex > 8)
@@ -137,7 +297,13 @@ namespace FractalTicTacToe.ConsoleApp
             return false;
         }
 
-        private static void RenderScreen(GameState state, Move? lastMove, string statusMessage, bool isErrorMessage)
+        private static void RenderScreen(
+            GameState state,
+            Move? lastMove,
+            string statusMessage,
+            bool isErrorMessage,
+            GameMode mode,
+            int botDepth)
         {
             try
             {
@@ -145,13 +311,14 @@ namespace FractalTicTacToe.ConsoleApp
             }
             catch
             {
-                // Ignorar si la consola está redirigida en pruebas automatizadas
+                // Ignorar si la consola está redirigida
             }
 
             WriteColoredLine("╔══════════════════════════════════════════════════════════════════════╗", ConsoleColor.Cyan);
             WriteColoredLine("║          FRACTAL TIC-TAC-TOE  •  MODO MUERTE SÚBITA (3 EN RAYA)     ║", ConsoleColor.Cyan);
             WriteColoredLine("╚══════════════════════════════════════════════════════════════════════╝", ConsoleColor.Cyan);
 
+            Console.WriteLine($"  Modo: {GetModeDescription(mode, botDepth)}");
             Console.Write("  Turno: ");
             if (state.IsGameOver)
             {
@@ -210,18 +377,17 @@ namespace FractalTicTacToe.ConsoleApp
                 " │ 6 │ 7 │ 8 │",
                 " └───────────┘",
                 "",
-                "Leyenda:",
-                " • Números grises (0-8): casilla vacía disponible",
-                " • Borde/Título VERDE: tablero activo donde debes tirar",
-                " • [X] / [O]: último movimiento realizado",
-                " • Comandos: 'r' = reiniciar, 'q' = salir"
+                "Leyenda y Comandos:",
+                " • Números grises (0-8): casilla disponible",
+                " • Borde/Título VERDE: tablero activo",
+                " • 'h' = sugerencia IA | 'm' = cambiar modo",
+                " • 'r' = reiniciar     | 'q' = salir"
             };
 
             int guideLineIndex = 0;
 
             for (int macroRow = 0; macroRow < 3; macroRow++)
             {
-                // Encabezados de los 3 tableros macro de esta fila
                 Console.Write("  ");
                 for (int macroCol = 0; macroCol < 3; macroCol++)
                 {
@@ -241,7 +407,6 @@ namespace FractalTicTacToe.ConsoleApp
                 }
                 AppendGuideLine(guideLines, ref guideLineIndex);
 
-                // Las 3 filas internas de celdas dentro de esta banda de tableros macro
                 for (int cellRow = 0; cellRow < 3; cellRow++)
                 {
                     Console.Write("  ");
@@ -282,7 +447,6 @@ namespace FractalTicTacToe.ConsoleApp
                     AppendGuideLine(guideLines, ref guideLineIndex);
                 }
 
-                // Separador horizontal entre filas de tableros macro
                 if (macroRow < 2)
                 {
                     Console.Write("  ");
@@ -304,7 +468,6 @@ namespace FractalTicTacToe.ConsoleApp
             }
             else
             {
-                // Casilla vacía: mostramos su índice en gris si el tablero es jugable, o un punto si está bloqueado
                 if (isBoardPlayable)
                 {
                     WriteColored($" {cellIndex} ", ConsoleColor.DarkGray);
@@ -341,11 +504,11 @@ namespace FractalTicTacToe.ConsoleApp
 
             if (state.ActiveBoardIndex == GameState.FreeMoveBoardIndex)
             {
-                Console.Write("Ingresa 'Tablero Celda' (0-8 0-8): ");
+                Console.Write("Ingresa 'Tablero Celda' (0-8 0-8) o 'h' para pista IA: ");
             }
             else
             {
-                Console.Write($"Tablero #{state.ActiveBoardIndex} activo -> Ingresa 'Celda' (0-8) o '{state.ActiveBoardIndex} Celda': ");
+                Console.Write($"Tablero #{state.ActiveBoardIndex} activo -> Ingresa 'Celda' (0-8) o 'h' para pista IA: ");
             }
         }
 
