@@ -1,20 +1,24 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace FractalTicTacToe.Core
 {
 #if NET6_0_OR_GREATER
     /// <summary>
-    /// Resultado detallado de una búsqueda Minimax con poda Alfa-Beta.
+    /// Resultado detallado de una búsqueda Minimax con Iterative Deepening y Tabla de Transposición.
     /// </summary>
     public readonly record struct MinimaxSearchResult(
         Move BestMove,
         int Score,
         int NodesEvaluated,
-        int MaxDepthReached);
+        int MaxDepthReached,
+        int TranspositionHits = 0,
+        int TranspositionCutoffs = 0,
+        long ElapsedMs = 0);
 #else
     /// <summary>
-    /// Resultado detallado de una búsqueda Minimax con poda Alfa-Beta.
+    /// Resultado detallado de una búsqueda Minimax con Iterative Deepening y Tabla de Transposición.
     /// </summary>
     public readonly struct MinimaxSearchResult : IEquatable<MinimaxSearchResult>
     {
@@ -22,20 +26,36 @@ namespace FractalTicTacToe.Core
         public int Score { get; }
         public int NodesEvaluated { get; }
         public int MaxDepthReached { get; }
+        public int TranspositionHits { get; }
+        public int TranspositionCutoffs { get; }
+        public long ElapsedMs { get; }
 
-        public MinimaxSearchResult(Move bestMove, int score, int nodesEvaluated, int maxDepthReached)
+        public MinimaxSearchResult(
+            Move bestMove,
+            int score,
+            int nodesEvaluated,
+            int maxDepthReached,
+            int transpositionHits = 0,
+            int transpositionCutoffs = 0,
+            long elapsedMs = 0)
         {
             BestMove = bestMove;
             Score = score;
             NodesEvaluated = nodesEvaluated;
             MaxDepthReached = maxDepthReached;
+            TranspositionHits = transpositionHits;
+            TranspositionCutoffs = transpositionCutoffs;
+            ElapsedMs = elapsedMs;
         }
 
         public bool Equals(MinimaxSearchResult other) =>
             BestMove.Equals(other.BestMove) &&
             Score == other.Score &&
             NodesEvaluated == other.NodesEvaluated &&
-            MaxDepthReached == other.MaxDepthReached;
+            MaxDepthReached == other.MaxDepthReached &&
+            TranspositionHits == other.TranspositionHits &&
+            TranspositionCutoffs == other.TranspositionCutoffs &&
+            ElapsedMs == other.ElapsedMs;
 
         public override bool Equals(object obj) => obj is MinimaxSearchResult other && Equals(other);
 
@@ -43,13 +63,13 @@ namespace FractalTicTacToe.Core
             (((BestMove.GetHashCode() * 397) ^ Score) * 397 ^ NodesEvaluated) * 397 ^ MaxDepthReached;
 
         public override string ToString() =>
-            $"Move: {BestMove}, Score: {Score}, Nodes: {NodesEvaluated}, Depth: {MaxDepthReached}";
+            $"Move: {BestMove}, Score: {Score}, Depth: {MaxDepthReached}, Nodes: {NodesEvaluated}, TT Hits: {TranspositionHits}, Time: {ElapsedMs}ms";
     }
 #endif
 
     /// <summary>
-    /// Agente de Inteligencia Artificial basado en Minimax con poda Alfa-Beta,
-    /// ordenamiento heurístico de movimientos sin asignaciones y evaluación táctica para Muerte Súbita.
+    /// Agente de Inteligencia Artificial basado en Negamax/Minimax con poda Alfa-Beta,
+    /// Tabla de Transposición Zobrist, Iterative Deepening por tiempo límite y niveles de dificultad.
     /// </summary>
     public sealed class MinimaxBot
     {
@@ -58,6 +78,7 @@ namespace FractalTicTacToe.Core
         private const int TwoInARowWeight = 400;
         private const int OneInARowWeight = 30;
         private const int UnsafeRedirectionPenalty = 250;
+        private const int TimeCheckIntervalMask = 255; // Verificar reloj cada 256 nodos
 
         // Pesos posicionales de cada celda (0..8) según el número de líneas ganadoras en las que participa:
         // Centro (4 líneas) = 16, Esquinas (3 líneas) = 9, Bordes (2 líneas) = 4
@@ -80,22 +101,103 @@ namespace FractalTicTacToe.Core
             2, 4, 6
         };
 
-        // Buffers reutilizables para evitar presión sobre el Garbage Collector en los nodos hoja
+        private readonly TranspositionTable _transpositionTable;
         private readonly int[] _botThreatsBuffer = new int[GameState.BoardCount];
         private readonly int[] _oppThreatsBuffer = new int[GameState.BoardCount];
+        private readonly Stopwatch _searchTimer = new Stopwatch();
 
+        private bool _searchAborted;
+        private bool _enforceTimeLimitInCurrentIteration;
+
+        public BotDifficulty Difficulty { get; }
         public int MaxDepth { get; }
+        public int TimeLimitMs { get; }
+        public bool UseTranspositionTable { get; }
+
         public int LastNodesEvaluated { get; private set; }
         public int LastSearchScore { get; private set; }
+        public int LastDepthReached { get; private set; }
+        public int LastTranspositionHits => _transpositionTable != null ? _transpositionTable.Hits : 0;
+        public int LastTranspositionCutoffs => _transpositionTable != null ? _transpositionTable.Cutoffs : 0;
 
-        public MinimaxBot(int maxDepth = 6)
+        /// <summary>
+        /// Crea una instancia del bot a partir de un nivel de dificultad preconfigurado.
+        /// </summary>
+        public MinimaxBot(BotDifficulty difficulty)
+        {
+            Difficulty = difficulty;
+
+            switch (difficulty)
+            {
+                case BotDifficulty.Easy:
+                    MaxDepth = 2;
+                    TimeLimitMs = 100;
+                    UseTranspositionTable = false;
+                    break;
+
+                case BotDifficulty.Medium:
+                    MaxDepth = 4;
+                    TimeLimitMs = 350;
+                    UseTranspositionTable = true;
+                    break;
+
+                case BotDifficulty.Hard:
+                    MaxDepth = 6;
+                    TimeLimitMs = 1000;
+                    UseTranspositionTable = true;
+                    break;
+
+                case BotDifficulty.Master:
+                    MaxDepth = 9;
+                    TimeLimitMs = 2500;
+                    UseTranspositionTable = true;
+                    break;
+
+                default:
+                    MaxDepth = 6;
+                    TimeLimitMs = 1000;
+                    UseTranspositionTable = true;
+                    break;
+            }
+
+            if (UseTranspositionTable)
+            {
+                _transpositionTable = new TranspositionTable();
+            }
+        }
+
+        /// <summary>
+        /// Crea una instancia personalizada del bot indicando profundidad máxima, límite de tiempo y uso de tabla Zobrist.
+        /// </summary>
+        public MinimaxBot(int maxDepth = 6, int timeLimitMs = 1500, bool useTranspositionTable = true)
         {
             if (maxDepth < 1)
             {
                 throw new ArgumentOutOfRangeException(nameof(maxDepth), "La profundidad máxima debe ser al menos 1.");
             }
 
+            if (timeLimitMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeLimitMs), "El límite de tiempo no puede ser negativo.");
+            }
+
+            Difficulty = BotDifficulty.Custom;
             MaxDepth = maxDepth;
+            TimeLimitMs = timeLimitMs;
+            UseTranspositionTable = useTranspositionTable;
+
+            if (UseTranspositionTable)
+            {
+                _transpositionTable = new TranspositionTable();
+            }
+        }
+
+        /// <summary>
+        /// Limpia por completo las entradas almacenadas en la tabla de transposición.
+        /// </summary>
+        public void ClearTranspositionTable()
+        {
+            _transpositionTable?.Clear();
         }
 
         /// <summary>
@@ -107,7 +209,7 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Ejecuta la búsqueda Minimax con poda Alfa-Beta y retorna métricas detalladas.
+        /// Ejecuta búsqueda con Iterative Deepening, poda Alfa-Beta y Tabla de Transposición Zobrist.
         /// </summary>
         public MinimaxSearchResult FindBestMove(GameState state)
         {
@@ -127,46 +229,251 @@ namespace FractalTicTacToe.Core
                 throw new InvalidOperationException("No existen movimientos legales disponibles.");
             }
 
-            Player botPlayer = state.CurrentPlayer;
+            Player rootPlayer = state.CurrentPlayer;
             LastNodesEvaluated = 0;
+            _transpositionTable?.ResetMetrics();
+            _searchTimer.Restart();
 
-            // Si es la apertura con tiro libre (81 opciones), limitamos la profundidad inicial a 4
-            // para mantener tiempos de respuesta instantáneos (< 50 ms) mientras priorizamos el centro.
-            int effectiveDepth = state.MoveCount == 0 ? Math.Min(MaxDepth, 4) : MaxDepth;
+            // Si es el primer tiro de la partida (81 opciones libres), acotamos la profundidad máxima de apertura
+            int targetMaxDepth = state.MoveCount == 0 ? Math.Min(MaxDepth, 5) : MaxDepth;
 
             // 1. Atajo de victoria inmediata en 1 turno (Muerte Súbita)
             for (int i = 0; i < legalMoves.Count; i++)
             {
                 Move candidate = legalMoves[i];
-                if (WouldMoveWinImmediately(state, candidate, botPlayer))
+                if (WouldMoveWinImmediately(state, candidate, rootPlayer))
                 {
+                    _searchTimer.Stop();
                     LastNodesEvaluated = 1;
-                    LastSearchScore = WinScore + (effectiveDepth * 100);
-                    return new MinimaxSearchResult(candidate, LastSearchScore, 1, 1);
+                    LastSearchScore = WinScore + (targetMaxDepth * 100);
+                    LastDepthReached = 1;
+                    return new MinimaxSearchResult(
+                        candidate,
+                        LastSearchScore,
+                        1,
+                        1,
+                        LastTranspositionHits,
+                        LastTranspositionCutoffs,
+                        _searchTimer.ElapsedMilliseconds);
                 }
             }
 
-            // 2. Ordenar movimientos en la raíz para maximizar podas Alfa-Beta
-            OrderMovesInPlace(state, legalMoves, botPlayer);
+            // Si solo existe un movimiento legal forzado, retornarlo sin gastar tiempo de búsqueda
+            if (legalMoves.Count == 1)
+            {
+                _searchTimer.Stop();
+                LastNodesEvaluated = 1;
+                LastSearchScore = 0;
+                LastDepthReached = 1;
+                return new MinimaxSearchResult(
+                    legalMoves[0],
+                    0,
+                    1,
+                    1,
+                    0,
+                    0,
+                    _searchTimer.ElapsedMilliseconds);
+            }
 
+            // 2. Ordenamiento táctico inicial en la raíz
+            Move? hashMove = null;
+            if (_transpositionTable != null &&
+                _transpositionTable.TryProbe(state.ZobristKey, out TranspositionEntry rootEntry))
+            {
+                hashMove = rootEntry.BestMove;
+            }
+
+            OrderMovesInPlace(state, legalMoves, rootPlayer, hashMove);
+
+            Move bestMoveOverall = legalMoves[0];
+            int bestScoreOverall = 0;
+            int completedDepth = 0;
+
+            // 3. Bucle de Iterative Deepening (profundidad 1 .. targetMaxDepth)
+            for (int currentDepth = 1; currentDepth <= targetMaxDepth; currentDepth++)
+            {
+                // Siempre garantizamos completar al menos profundidad 1 antes de aplicar corte por reloj
+                _enforceTimeLimitInCurrentIteration = currentDepth > 1 && TimeLimitMs > 0;
+                _searchAborted = false;
+
+                if (_enforceTimeLimitInCurrentIteration && _searchTimer.ElapsedMilliseconds >= TimeLimitMs)
+                {
+                    break;
+                }
+
+                // Promover el mejor movimiento de la iteración previa (Principal Variation) al primer lugar
+                if (currentDepth > 1)
+                {
+                    PromoteMoveToFront(legalMoves, bestMoveOverall);
+                }
+
+                Move iterationBestMove = legalMoves[0];
+                int iterationBestScore = int.MinValue + 1;
+                int alpha = int.MinValue + 1;
+                int beta = int.MaxValue;
+
+                for (int i = 0; i < legalMoves.Count; i++)
+                {
+                    Move move = legalMoves[i];
+                    GameState childState = state.Clone();
+                    childState.MakeMove(move);
+
+                    int score = -Negamax(
+                        childState,
+                        currentDepth - 1,
+                        -beta,
+                        -alpha);
+
+                    if (_searchAborted)
+                    {
+                        break;
+                    }
+
+                    if (score > iterationBestScore)
+                    {
+                        iterationBestScore = score;
+                        iterationBestMove = move;
+                    }
+
+                    if (score > alpha)
+                    {
+                        alpha = score;
+                    }
+                }
+
+                // Si la iteración se abortó a la mitad por tiempo límite, conservamos el resultado completo de la profundidad previa
+                if (_searchAborted)
+                {
+                    break;
+                }
+
+                bestMoveOverall = iterationBestMove;
+                bestScoreOverall = iterationBestScore;
+                completedDepth = currentDepth;
+
+                _transpositionTable?.Store(
+                    state.ZobristKey,
+                    currentDepth,
+                    bestScoreOverall,
+                    TranspositionFlag.Exact,
+                    bestMoveOverall);
+
+                // Corte temprano si ya encontramos una secuencia de victoria forzada o derrota inevitable
+                if (bestScoreOverall >= WinScore - 1000 || bestScoreOverall <= -WinScore + 1000)
+                {
+                    break;
+                }
+            }
+
+            _searchTimer.Stop();
+            LastSearchScore = bestScoreOverall;
+            LastDepthReached = completedDepth;
+
+            return new MinimaxSearchResult(
+                bestMoveOverall,
+                bestScoreOverall,
+                LastNodesEvaluated,
+                completedDepth,
+                LastTranspositionHits,
+                LastTranspositionCutoffs,
+                _searchTimer.ElapsedMilliseconds);
+        }
+
+        /// <summary>
+        /// Algoritmo Negamax con poda Alfa-Beta y consulta/escritura en Tabla de Transposición Zobrist.
+        /// Retorna la evaluación desde la perspectiva de <c>state.CurrentPlayer</c>.
+        /// </summary>
+        private int Negamax(GameState state, int depth, int alpha, int beta)
+        {
+            if (_enforceTimeLimitInCurrentIteration &&
+                (LastNodesEvaluated & TimeCheckIntervalMask) == 0 &&
+                _searchTimer.ElapsedMilliseconds >= TimeLimitMs)
+            {
+                _searchAborted = true;
+                return 0;
+            }
+
+            LastNodesEvaluated++;
+
+            // 1. Estado terminal (Victoria por muerte súbita o empate global)
+            if (state.IsGameOver)
+            {
+                if (state.Winner == Player.None)
+                {
+                    return 0;
+                }
+
+                // En Negamax, si el estado ya terminó tras el tiro del jugador anterior,
+                // el ganador es quien acaba de tirar (el oponente de state.CurrentPlayer).
+                // Aun así verificamos explícitamente quién ganó respecto a state.CurrentPlayer:
+                return state.Winner == state.CurrentPlayer
+                    ? WinScore + (depth * 100)
+                    : -WinScore - (depth * 100);
+            }
+
+            int originalAlpha = alpha;
+            Move? hashMove = null;
+
+            // 2. Consulta en la Tabla de Transposición Zobrist
+            if (_transpositionTable != null &&
+                _transpositionTable.TryProbe(state.ZobristKey, out TranspositionEntry ttEntry))
+            {
+                hashMove = ttEntry.BestMove;
+
+                if (ttEntry.Depth >= depth)
+                {
+                    if (ttEntry.Flag == TranspositionFlag.Exact)
+                    {
+                        _transpositionTable.RecordCutoff();
+                        return ttEntry.Score;
+                    }
+
+                    if (ttEntry.Flag == TranspositionFlag.LowerBound && ttEntry.Score > alpha)
+                    {
+                        alpha = ttEntry.Score;
+                    }
+                    else if (ttEntry.Flag == TranspositionFlag.UpperBound && ttEntry.Score < beta)
+                    {
+                        beta = ttEntry.Score;
+                    }
+
+                    if (alpha >= beta)
+                    {
+                        _transpositionTable.RecordCutoff();
+                        return ttEntry.Score;
+                    }
+                }
+            }
+
+            // 3. Caso base de profundidad -> Evaluación heurística estática relativa al jugador en turno
+            if (depth <= 0)
+            {
+                return EvaluateStateInternal(state, state.CurrentPlayer, _botThreatsBuffer, _oppThreatsBuffer);
+            }
+
+            List<Move> legalMoves = state.GetLegalMoves();
+
+            // 4. Ordenamiento de movimientos usando el HashMove (Principal Variation) + heurística táctica
+            if (legalMoves.Count > 1 && (depth >= 2 || hashMove.HasValue))
+            {
+                OrderMovesInPlace(state, legalMoves, state.CurrentPlayer, hashMove);
+            }
+
+            int bestScore = int.MinValue + 1;
             Move bestMove = legalMoves[0];
-            int bestScore = int.MinValue;
-            int alpha = int.MinValue + 1;
-            int beta = int.MaxValue;
 
             for (int i = 0; i < legalMoves.Count; i++)
             {
                 Move move = legalMoves[i];
-                GameState nextState = state.Clone();
-                nextState.MakeMove(move);
+                GameState child = state.Clone();
+                child.MakeMove(move);
 
-                int score = Minimax(
-                    nextState,
-                    effectiveDepth - 1,
-                    alpha,
-                    beta,
-                    isMaximizing: false,
-                    botPlayer: botPlayer);
+                int score = -Negamax(child, depth - 1, -beta, -alpha);
+
+                if (_searchAborted)
+                {
+                    return 0;
+                }
 
                 if (score > bestScore)
                 {
@@ -178,130 +485,58 @@ namespace FractalTicTacToe.Core
                 {
                     alpha = score;
                 }
+
+                if (alpha >= beta)
+                {
+                    break; // Poda Beta
+                }
             }
 
-            LastSearchScore = bestScore;
-            return new MinimaxSearchResult(bestMove, bestScore, LastNodesEvaluated, effectiveDepth);
-        }
-
-        private int Minimax(
-            GameState state,
-            int depth,
-            int alpha,
-            int beta,
-            bool isMaximizing,
-            Player botPlayer)
-        {
-            LastNodesEvaluated++;
-
-            // Caso base 1: Estado terminal (Victoria por muerte súbita o empate global)
-            if (state.IsGameOver)
+            // 5. Almacenar resultado en la Tabla de Transposición si la búsqueda no fue abortada
+            if (_transpositionTable != null && !_searchAborted)
             {
-                if (state.Winner == Player.None)
+                TranspositionFlag flag;
+                if (bestScore <= originalAlpha)
                 {
-                    return 0;
+                    flag = TranspositionFlag.UpperBound;
+                }
+                else if (bestScore >= beta)
+                {
+                    flag = TranspositionFlag.LowerBound;
+                }
+                else
+                {
+                    flag = TranspositionFlag.Exact;
                 }
 
-                // Preferimos victorias más rápidas (+depth) y derrotas más lejanas (-depth)
-                return state.Winner == botPlayer
-                    ? WinScore + (depth * 100)
-                    : -WinScore - (depth * 100);
+                _transpositionTable.Store(state.ZobristKey, depth, bestScore, flag, bestMove);
             }
 
-            // Caso base 2: Límite de profundidad alcanzado -> Evaluación heurística estática
-            if (depth <= 0)
-            {
-                return EvaluateStateInternal(state, botPlayer, _botThreatsBuffer, _oppThreatsBuffer);
-            }
-
-            List<Move> legalMoves = state.GetLegalMoves();
-
-            // Ordenamos los movimientos en nodos internos para maximizar los cortes Alfa-Beta
-            if (depth >= 2 && legalMoves.Count > 1)
-            {
-                OrderMovesInPlace(state, legalMoves, state.CurrentPlayer);
-            }
-
-            if (isMaximizing)
-            {
-                int maxEval = int.MinValue;
-
-                for (int i = 0; i < legalMoves.Count; i++)
-                {
-                    GameState child = state.Clone();
-                    child.MakeMove(legalMoves[i]);
-
-                    int eval = Minimax(child, depth - 1, alpha, beta, isMaximizing: false, botPlayer);
-                    if (eval > maxEval)
-                    {
-                        maxEval = eval;
-                    }
-
-                    if (eval > alpha)
-                    {
-                        alpha = eval;
-                    }
-
-                    if (beta <= alpha)
-                    {
-                        break; // Poda Beta
-                    }
-                }
-
-                return maxEval;
-            }
-            else
-            {
-                int minEval = int.MaxValue;
-
-                for (int i = 0; i < legalMoves.Count; i++)
-                {
-                    GameState child = state.Clone();
-                    child.MakeMove(legalMoves[i]);
-
-                    int eval = Minimax(child, depth - 1, alpha, beta, isMaximizing: true, botPlayer);
-                    if (eval < minEval)
-                    {
-                        minEval = eval;
-                    }
-
-                    if (eval < beta)
-                    {
-                        beta = eval;
-                    }
-
-                    if (beta <= alpha)
-                    {
-                        break; // Poda Alfa
-                    }
-                }
-
-                return minEval;
-            }
+            return bestScore;
         }
 
         /// <summary>
-        /// Evalúa heurísticamente un estado no terminal desde la perspectiva de <paramref name="botPlayer"/>.
+        /// Evalúa heurísticamente un estado no terminal desde la perspectiva de <paramref name="perspectivePlayer"/>.
         /// </summary>
-        public static int EvaluateState(GameState state, Player botPlayer)
+        public static int EvaluateState(GameState state, Player perspectivePlayer)
         {
-            int[] botThreats = new int[GameState.BoardCount];
+            int[] ownThreats = new int[GameState.BoardCount];
             int[] oppThreats = new int[GameState.BoardCount];
-            return EvaluateStateInternal(state, botPlayer, botThreats, oppThreats);
+            return EvaluateStateInternal(state, perspectivePlayer, ownThreats, oppThreats);
         }
 
         private static int EvaluateStateInternal(
             GameState state,
-            Player botPlayer,
-            int[] botThreatsPerBoard,
+            Player perspectivePlayer,
+            int[] ownThreatsPerBoard,
             int[] oppThreatsPerBoard)
         {
-            Player opponent = GetOpponent(botPlayer);
+            Player opponent = GetOpponent(perspectivePlayer);
             int totalScore = 0;
-            int totalBotThreats = 0;
+            int totalOwnThreats = 0;
             int totalOppThreats = 0;
 
-            Array.Clear(botThreatsPerBoard, 0, GameState.BoardCount);
+            Array.Clear(ownThreatsPerBoard, 0, GameState.BoardCount);
             Array.Clear(oppThreatsPerBoard, 0, GameState.BoardCount);
 
             for (int board = 0; board < GameState.BoardCount; board++)
@@ -310,7 +545,7 @@ namespace FractalTicTacToe.Core
                 for (int cell = 0; cell < GameState.CellsPerBoard; cell++)
                 {
                     Player occupant = state.GetCell(board, cell);
-                    if (occupant == botPlayer)
+                    if (occupant == perspectivePlayer)
                     {
                         totalScore += CellPositionalWeights[cell];
                     }
@@ -327,22 +562,21 @@ namespace FractalTicTacToe.Core
                     Player c1 = state.GetCell(board, WinLines[lineIdx + 1]);
                     Player c2 = state.GetCell(board, WinLines[lineIdx + 2]);
 
-                    int botCount = (c0 == botPlayer ? 1 : 0) + (c1 == botPlayer ? 1 : 0) + (c2 == botPlayer ? 1 : 0);
+                    int ownCount = (c0 == perspectivePlayer ? 1 : 0) + (c1 == perspectivePlayer ? 1 : 0) + (c2 == perspectivePlayer ? 1 : 0);
                     int oppCount = (c0 == opponent ? 1 : 0) + (c1 == opponent ? 1 : 0) + (c2 == opponent ? 1 : 0);
 
-                    // Si ambos jugadores están en la misma línea, está bloqueada (0 puntos)
-                    if (botCount > 0 && oppCount > 0)
+                    if (ownCount > 0 && oppCount > 0)
                     {
                         continue;
                     }
 
-                    if (botCount == 2)
+                    if (ownCount == 2)
                     {
                         totalScore += TwoInARowWeight;
-                        botThreatsPerBoard[board]++;
-                        totalBotThreats++;
+                        ownThreatsPerBoard[board]++;
+                        totalOwnThreats++;
                     }
-                    else if (botCount == 1)
+                    else if (ownCount == 1)
                     {
                         totalScore += OneInARowWeight;
                     }
@@ -361,18 +595,17 @@ namespace FractalTicTacToe.Core
 
             // 3. Evaluación táctica del jugador con el turno actual (Tempo de Muerte Súbita)
             int activeBoard = state.ActiveBoardIndex;
-            if (state.CurrentPlayer == botPlayer)
+            if (state.CurrentPlayer == perspectivePlayer)
             {
                 bool canWinNow = activeBoard == GameState.FreeMoveBoardIndex
-                    ? totalBotThreats > 0
-                    : botThreatsPerBoard[activeBoard] > 0;
+                    ? totalOwnThreats > 0
+                    : ownThreatsPerBoard[activeBoard] > 0;
 
                 if (canWinNow)
                 {
                     return ImmediateThreatBonus;
                 }
 
-                // Penalizar si desde el tablero activo muchas casillas redirigen a tableros minados por el rival
                 if (activeBoard != GameState.FreeMoveBoardIndex)
                 {
                     for (int cell = 0; cell < GameState.CellsPerBoard; cell++)
@@ -399,7 +632,7 @@ namespace FractalTicTacToe.Core
                 {
                     for (int cell = 0; cell < GameState.CellsPerBoard; cell++)
                     {
-                        if (state.GetCell(activeBoard, cell) == Player.None && botThreatsPerBoard[cell] > 0)
+                        if (state.GetCell(activeBoard, cell) == Player.None && ownThreatsPerBoard[cell] > 0)
                         {
                             totalScore += UnsafeRedirectionPenalty;
                         }
@@ -410,11 +643,28 @@ namespace FractalTicTacToe.Core
             return totalScore;
         }
 
+        private static void PromoteMoveToFront(List<Move> moves, Move targetMove)
+        {
+            for (int i = 1; i < moves.Count; i++)
+            {
+                if (moves[i].Equals(targetMove))
+                {
+                    Move temp = moves[i];
+                    for (int j = i; j > 0; j--)
+                    {
+                        moves[j] = moves[j - 1];
+                    }
+                    moves[0] = temp;
+                    return;
+                }
+            }
+        }
+
         /// <summary>
         /// Ordena los movimientos candidatos in-place de mayor a menor prioridad táctica
-        /// usando Insertion Sort para evitar asignaciones de delegados en el árbol de búsqueda.
+        /// priorizando el HashMove de la Tabla de Transposición y usando Insertion Sort sin asignaciones de delegados.
         /// </summary>
-        private static void OrderMovesInPlace(GameState state, List<Move> moves, Player currentPlayer)
+        private static void OrderMovesInPlace(GameState state, List<Move> moves, Player currentPlayer, Move? hashMove)
         {
             int count = moves.Count;
             if (count <= 1)
@@ -427,7 +677,15 @@ namespace FractalTicTacToe.Core
 
             for (int i = 0; i < count; i++)
             {
-                scores[i] = ScoreMoveForOrdering(state, moves[i], currentPlayer, opponent);
+                Move move = moves[i];
+                if (hashMove.HasValue && move.Equals(hashMove.Value))
+                {
+                    scores[i] = 2_000_000; // Prioridad máxima: Principal Variation de la Tabla de Transposición
+                }
+                else
+                {
+                    scores[i] = ScoreMoveForOrdering(state, move, currentPlayer, opponent);
+                }
             }
 
             for (int i = 1; i < count; i++)
@@ -450,23 +708,19 @@ namespace FractalTicTacToe.Core
 
         private static int ScoreMoveForOrdering(GameState state, Move move, Player currentPlayer, Player opponent)
         {
-            // 1. Si el movimiento gana inmediatamente la partida, prioridad máxima absoluta
             if (WouldMoveWinImmediately(state, move, currentPlayer))
             {
                 return 1_000_000;
             }
 
-            // 2. Prioridad por peso posicional tanto de la celda como del tablero
             int score = (CellPositionalWeights[move.CellIndex] * 10) + CellPositionalWeights[move.BoardIndex];
 
-            // 3. Penalizar fuertemente enviar al rival a un tablero donde el rival ya tiene 2 en raya
             int targetBoard = move.CellIndex;
             if (DoesBoardHaveImmediateWin(state, targetBoard, opponent))
             {
                 score -= 50_000;
             }
 
-            // 4. Bonificar si el tiro bloquea un 2 en raya del rival en el tablero actual
             if (WouldMoveWinImmediately(state, move, opponent))
             {
                 score += 2_000;
@@ -475,10 +729,6 @@ namespace FractalTicTacToe.Core
             return score;
         }
 
-        /// <summary>
-        /// Determina si colocar una ficha de <paramref name="player"/> en <paramref name="move"/>
-        /// completaría un 3 en raya en ese sub-tablero.
-        /// </summary>
         private static bool WouldMoveWinImmediately(GameState state, Move move, Player player)
         {
             int board = move.BoardIndex;
@@ -508,10 +758,6 @@ namespace FractalTicTacToe.Core
             return false;
         }
 
-        /// <summary>
-        /// Verifica si <paramref name="player"/> ya tiene alguna línea con 2 fichas propias y 1 casilla vacía
-        /// dentro del sub-tablero <paramref name="boardIndex"/>.
-        /// </summary>
         private static bool DoesBoardHaveImmediateWin(GameState state, int boardIndex, Player player)
         {
             for (int i = 0; i < WinLines.Length; i += 3)

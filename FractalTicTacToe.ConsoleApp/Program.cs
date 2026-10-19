@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using FractalTicTacToe.Core;
@@ -21,17 +20,16 @@ namespace FractalTicTacToe.ConsoleApp
         {
             Console.OutputEncoding = Encoding.UTF8;
 
-            GameMode mode = SelectGameMode(args, out int botDepth);
-            var bot = new MinimaxBot(botDepth);
+            GameMode mode = SelectGameMode(args, out MinimaxBot bot);
 
             var state = new GameState();
             Move? lastMove = null;
-            string statusMessage = $"Modo activo: {GetModeDescription(mode, botDepth)}";
+            string statusMessage = $"Modo activo: {GetModeDescription(mode, bot)}";
             bool isErrorMessage = false;
 
             while (true)
             {
-                RenderScreen(state, lastMove, statusMessage, isErrorMessage, mode, botDepth);
+                RenderScreen(state, lastMove, statusMessage, isErrorMessage, mode, bot);
                 statusMessage = null;
                 isErrorMessage = false;
 
@@ -43,17 +41,17 @@ namespace FractalTicTacToe.ConsoleApp
 
                     if (retry == "m")
                     {
-                        mode = SelectGameMode(Array.Empty<string>(), out botDepth);
-                        bot = new MinimaxBot(botDepth);
+                        mode = SelectGameMode(Array.Empty<string>(), out bot);
                         state = new GameState();
                         lastMove = null;
-                        statusMessage = $"Modo cambiado a: {GetModeDescription(mode, botDepth)}";
+                        statusMessage = $"Modo cambiado a: {GetModeDescription(mode, bot)}";
                         continue;
                     }
 
                     if (retry == "s" || retry == "si" || retry == "sí" || retry == "y")
                     {
                         state = new GameState();
+                        bot.ClearTranspositionTable();
                         lastMove = null;
                         continue;
                     }
@@ -66,25 +64,27 @@ namespace FractalTicTacToe.ConsoleApp
 
                 if (isBotTurn)
                 {
-                    ConsoleColor botColor = state.CurrentPlayer == Player.X ? ConsoleColor.Red : ConsoleColor.Blue;
+                    Player botPlayer = state.CurrentPlayer;
+                    ConsoleColor botColor = botPlayer == Player.X ? ConsoleColor.Red : ConsoleColor.Blue;
                     Console.WriteLine();
-                    WriteColored($"  [Bot Minimax ({state.CurrentPlayer})]", botColor);
-                    Console.WriteLine($" Calculando jugada óptima (Profundidad máx: {bot.MaxDepth})...");
+                    WriteColored($"  [Bot Minimax ({botPlayer})]", botColor);
+                    Console.WriteLine(
+                        $" Pensando (Dificultad: {bot.Difficulty}, Prof. máx: {bot.MaxDepth}, Límite: {bot.TimeLimitMs} ms)...");
 
-                    var sw = Stopwatch.StartNew();
                     MinimaxSearchResult searchResult = bot.FindBestMove(state);
-                    sw.Stop();
 
                     if (mode == GameMode.BotVsBot)
                     {
-                        Thread.Sleep(250);
+                        Thread.Sleep(200);
                     }
 
                     state.MakeMove(searchResult.BestMove);
                     lastMove = searchResult.BestMove;
                     statusMessage =
-                        $"Bot ({ (state.CurrentPlayer == Player.X ? Player.O : Player.X) }) jugó {searchResult.BestMove} | " +
-                        $"Eval: {searchResult.Score} | Nodos: {searchResult.NodesEvaluated:N0} | Tiempo: {sw.ElapsedMilliseconds} ms";
+                        $"Bot ({botPlayer}) jugó {searchResult.BestMove} | " +
+                        $"Eval: {searchResult.Score} | Prof: {searchResult.MaxDepthReached}/{bot.MaxDepth} | " +
+                        $"Nodos: {searchResult.NodesEvaluated:N0} | TT Hits: {searchResult.TranspositionHits:N0} ({searchResult.TranspositionCutoffs:N0} podas) | " +
+                        $"{searchResult.ElapsedMs} ms";
                     continue;
                 }
 
@@ -108,30 +108,29 @@ namespace FractalTicTacToe.ConsoleApp
                     string.Equals(trimmed, "reiniciar", StringComparison.OrdinalIgnoreCase))
                 {
                     state = new GameState();
+                    bot.ClearTranspositionTable();
                     lastMove = null;
-                    statusMessage = "Partida reiniciada.";
+                    statusMessage = "Partida y Tabla de Transposición reiniciadas.";
                     continue;
                 }
 
                 if (string.Equals(trimmed, "m", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(trimmed, "modo", StringComparison.OrdinalIgnoreCase))
                 {
-                    mode = SelectGameMode(Array.Empty<string>(), out botDepth);
-                    bot = new MinimaxBot(botDepth);
+                    mode = SelectGameMode(Array.Empty<string>(), out bot);
                     state = new GameState();
                     lastMove = null;
-                    statusMessage = $"Modo cambiado a: {GetModeDescription(mode, botDepth)}";
+                    statusMessage = $"Modo cambiado a: {GetModeDescription(mode, bot)}";
                     continue;
                 }
 
                 if (string.Equals(trimmed, "h", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(trimmed, "hint", StringComparison.OrdinalIgnoreCase))
                 {
-                    var sw = Stopwatch.StartNew();
                     MinimaxSearchResult hint = bot.FindBestMove(state);
-                    sw.Stop();
                     statusMessage =
-                        $"Sugerencia Minimax: {hint.BestMove} (Eval: {hint.Score}, {hint.NodesEvaluated:N0} nodos en {sw.ElapsedMilliseconds} ms)";
+                        $"Sugerencia IA: {hint.BestMove} | Eval: {hint.Score} | Prof: {hint.MaxDepthReached} | " +
+                        $"Nodos: {hint.NodesEvaluated:N0} | TT Hits: {hint.TranspositionHits:N0} | {hint.ElapsedMs} ms";
                     continue;
                 }
 
@@ -153,13 +152,12 @@ namespace FractalTicTacToe.ConsoleApp
             }
         }
 
-        private static GameMode SelectGameMode(string[] args, out int botDepth)
+        private static GameMode SelectGameMode(string[] args, out MinimaxBot bot)
         {
-            botDepth = 6;
-
             // Si la entrada estándar está redirigida (ej. pruebas automatizadas por pipe), mantener 2P por defecto
             if (Console.IsInputRedirected && (args == null || args.Length == 0))
             {
+                bot = new MinimaxBot(BotDifficulty.Hard);
                 return GameMode.HumanVsHuman;
             }
 
@@ -199,14 +197,43 @@ namespace FractalTicTacToe.ConsoleApp
                 selectedMode = GameMode.BotVsBot;
             }
 
-            if (selectedMode != GameMode.HumanVsHuman)
+            if (selectedMode == GameMode.HumanVsHuman)
             {
-                Console.Write("  Profundidad de búsqueda del Bot Minimax (1-8) [Por defecto: 6]: ");
-                string depthInput = Console.ReadLine()?.Trim();
-                if (int.TryParse(depthInput, out int parsedDepth) && parsedDepth >= 1 && parsedDepth <= 8)
-                {
-                    botDepth = parsedDepth;
-                }
+                bot = new MinimaxBot(BotDifficulty.Hard);
+                return selectedMode;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("  Niveles de Dificultad del Bot:");
+            Console.WriteLine("    [1] Fácil      (Prof. 2 |  100 ms | Sin Tabla Zobrist)");
+            Console.WriteLine("    [2] Medio      (Prof. 4 |  350 ms | Con Tabla Zobrist)");
+            Console.WriteLine("    [3] Difícil    (Prof. 6 | 1000 ms | Iterative Deepening + Zobrist) [Por defecto]");
+            Console.WriteLine("    [4] Maestro    (Prof. 9 | 2500 ms | Iterative Deepening + Zobrist)");
+            Console.WriteLine("    [5] Personalizado (Definir profundidad y límite de tiempo en ms)");
+            Console.Write("  Selecciona dificultad (1-5) [Por defecto: 3]: ");
+
+            string diffInput = Console.ReadLine()?.Trim();
+            switch (diffInput)
+            {
+                case "1":
+                    bot = new MinimaxBot(BotDifficulty.Easy);
+                    break;
+                case "2":
+                    bot = new MinimaxBot(BotDifficulty.Medium);
+                    break;
+                case "4":
+                    bot = new MinimaxBot(BotDifficulty.Master);
+                    break;
+                case "5":
+                    Console.Write("    Profundidad máxima (1-12) [Por defecto: 7]: ");
+                    int customDepth = int.TryParse(Console.ReadLine()?.Trim(), out int d) && d >= 1 && d <= 12 ? d : 7;
+                    Console.Write("    Tiempo límite por jugada en ms (50-10000) [Por defecto: 1500]: ");
+                    int customTime = int.TryParse(Console.ReadLine()?.Trim(), out int t) && t >= 50 && t <= 10000 ? t : 1500;
+                    bot = new MinimaxBot(customDepth, customTime, useTranspositionTable: true);
+                    break;
+                default:
+                    bot = new MinimaxBot(BotDifficulty.Hard);
+                    break;
             }
 
             return selectedMode;
@@ -227,16 +254,17 @@ namespace FractalTicTacToe.ConsoleApp
             }
         }
 
-        private static string GetModeDescription(GameMode mode, int botDepth)
+        private static string GetModeDescription(GameMode mode, MinimaxBot bot)
         {
+            string botInfo = $"{bot.Difficulty} (Prof. máx {bot.MaxDepth}, {bot.TimeLimitMs} ms, TT={(bot.UseTranspositionTable ? "ON" : "OFF")})";
             switch (mode)
             {
                 case GameMode.HumanVsBotX:
-                    return $"Humano (X) vs. Bot Minimax (O) [Profundidad {botDepth}]";
+                    return $"Humano (X) vs. Bot (O) [{botInfo}]";
                 case GameMode.BotVsHumanO:
-                    return $"Bot Minimax (X) [Profundidad {botDepth}] vs. Humano (O)";
+                    return $"Bot (X) [{botInfo}] vs. Humano (O)";
                 case GameMode.BotVsBot:
-                    return $"Bot (X) vs. Bot (O) [Profundidad {botDepth}]";
+                    return $"Bot (X) vs. Bot (O) [{botInfo}]";
                 default:
                     return "Humano (X) vs. Humano (O)";
             }
@@ -303,7 +331,7 @@ namespace FractalTicTacToe.ConsoleApp
             string statusMessage,
             bool isErrorMessage,
             GameMode mode,
-            int botDepth)
+            MinimaxBot bot)
         {
             try
             {
@@ -318,7 +346,7 @@ namespace FractalTicTacToe.ConsoleApp
             WriteColoredLine("║          FRACTAL TIC-TAC-TOE  •  MODO MUERTE SÚBITA (3 EN RAYA)     ║", ConsoleColor.Cyan);
             WriteColoredLine("╚══════════════════════════════════════════════════════════════════════╝", ConsoleColor.Cyan);
 
-            Console.WriteLine($"  Modo: {GetModeDescription(mode, botDepth)}");
+            Console.WriteLine($"  Modo: {GetModeDescription(mode, bot)}");
             Console.Write("  Turno: ");
             if (state.IsGameOver)
             {
@@ -330,10 +358,10 @@ namespace FractalTicTacToe.ConsoleApp
                 WriteColored($"Jugador {state.CurrentPlayer}", playerColor);
             }
 
-            Console.Write($"   |   Movimientos: {state.MoveCount}/81   |   Último tiro: ");
+            Console.Write($"   |   Movs: {state.MoveCount}/81   |   Zobrist: 0x{state.ZobristKey:X16}   |   Último: ");
             if (lastMove.HasValue)
             {
-                WriteColoredLine($"Tablero {lastMove.Value.BoardIndex}, Celda {lastMove.Value.CellIndex}", ConsoleColor.White);
+                WriteColoredLine($"B:{lastMove.Value.BoardIndex}, C:{lastMove.Value.CellIndex}", ConsoleColor.White);
             }
             else
             {
@@ -380,7 +408,7 @@ namespace FractalTicTacToe.ConsoleApp
                 "Leyenda y Comandos:",
                 " • Números grises (0-8): casilla disponible",
                 " • Borde/Título VERDE: tablero activo",
-                " • 'h' = sugerencia IA | 'm' = cambiar modo",
+                " • 'h' = sugerencia IA | 'm' = cambiar modo/dificultad",
                 " • 'r' = reiniciar     | 'q' = salir"
             };
 

@@ -5,7 +5,7 @@ namespace FractalTicTacToe.Core
 {
     /// <summary>
     /// Gestiona el estado completo y las reglas del juego Fractal Tic-Tac-Toe (Muerte Súbita).
-    /// Diseñado sin dependencias externas y optimizado para búsqueda adversarial (Minimax).
+    /// Diseñado sin dependencias externas y optimizado para búsqueda adversarial (Minimax + Zobrist Hashing).
     /// </summary>
     public sealed class GameState
     {
@@ -16,7 +16,7 @@ namespace FractalTicTacToe.Core
 
         /// <summary>
         /// Patrones ganadores de 3 en raya dentro de cualquier tablero pequeño (índices 0..8).
-        /// Aplanado en pares de 3 para iteración rápida sin saltos de puntero.
+        /// Aplanado en ternas para iteración rápida sin saltos de puntero.
         /// </summary>
         private static readonly int[] WinPatterns =
         {
@@ -45,6 +45,12 @@ namespace FractalTicTacToe.Core
         public Player Winner { get; private set; }
         public int MoveCount => _totalMoves;
 
+        /// <summary>
+        /// Hash Zobrist incremental de 64 bits que identifica unívocamente la posición,
+        /// el jugador en turno y el tablero macro activo.
+        /// </summary>
+        public ulong ZobristKey { get; private set; }
+
         public GameState()
         {
             _cells = new Player[TotalCells];
@@ -54,6 +60,7 @@ namespace FractalTicTacToe.Core
             ActiveBoardIndex = FreeMoveBoardIndex;
             IsGameOver = false;
             Winner = Player.None;
+            ZobristKey = ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
         }
 
         private GameState(GameState source)
@@ -69,6 +76,7 @@ namespace FractalTicTacToe.Core
             ActiveBoardIndex = source.ActiveBoardIndex;
             IsGameOver = source.IsGameOver;
             Winner = source.Winner;
+            ZobristKey = source.ZobristKey;
         }
 
         /// <summary>
@@ -173,7 +181,7 @@ namespace FractalTicTacToe.Core
 
         /// <summary>
         /// Valida y aplica un movimiento al estado actual.
-        /// Actualiza condición de victoria por muerte súbita, empate global, redirección de tablero y turno.
+        /// Actualiza condición de victoria por muerte súbita, empate global, redirección de tablero, turno y hash Zobrist.
         /// </summary>
         /// <param name="move">Movimiento a ejecutar.</param>
         /// <returns>true si el movimiento fue legal y se aplicó; false en caso contrario.</returns>
@@ -185,6 +193,11 @@ namespace FractalTicTacToe.Core
             }
 
             int flatIndex = (move.BoardIndex * CellsPerBoard) + move.CellIndex;
+
+            // Retirar del hash el ActiveBoardIndex previo e incorporar la nueva ficha colocada
+            ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
+            ZobristKey ^= ZobristHasher.GetPieceKey(flatIndex, CurrentPlayer);
+
             _cells[flatIndex] = CurrentPlayer;
             _boardOccupancy[move.BoardIndex]++;
             _totalMoves++;
@@ -195,6 +208,7 @@ namespace FractalTicTacToe.Core
                 Winner = CurrentPlayer;
                 IsGameOver = true;
                 ActiveBoardIndex = FreeMoveBoardIndex;
+                ZobristKey ^= ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
                 return true;
             }
 
@@ -204,6 +218,7 @@ namespace FractalTicTacToe.Core
                 Winner = Player.None;
                 IsGameOver = true;
                 ActiveBoardIndex = FreeMoveBoardIndex;
+                ZobristKey ^= ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
                 return true;
             }
 
@@ -211,9 +226,11 @@ namespace FractalTicTacToe.Core
             // Si el tablero destino está saturado (9 casillas llenas), se otorga Tiro Libre (-1)
             int targetBoard = move.CellIndex;
             ActiveBoardIndex = IsBoardFull(targetBoard) ? FreeMoveBoardIndex : targetBoard;
+            ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
 
-            // 4. Alternar jugador activo
+            // 4. Alternar jugador activo y actualizar paridad de turno en el hash Zobrist
             CurrentPlayer = CurrentPlayer == Player.X ? Player.O : Player.X;
+            ZobristKey ^= ZobristHasher.TurnKey;
 
             return true;
         }
