@@ -22,3 +22,10 @@ artifacts/
 Thumbs.db
 *.fttt
 
+## Godot 4 cache
+.godot/
+.mono/
+data_*/
+android/
+
+

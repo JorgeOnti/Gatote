@@ -21,8 +21,9 @@ namespace CoreTests
             TestMinimaxAvoidsSendingOpponentToLandmineBoard();
             TestTranspositionTableHitAndSpeedup();
             TestIterativeDeepeningTimeLimitAndDifficulties();
+            TestGameSessionControllerAsyncFlow();
 
-            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO y Minimax pasaron exitosamente!");
+            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO, Sesión Móvil y Minimax pasaron exitosamente!");
             return 0;
         }
 
@@ -278,6 +279,30 @@ namespace CoreTests
                 Move move = presetBot.GetBestMove(state);
                 Assert(state.IsValidMove(move), $"El nivel de dificultad {diff} debe retornar un movimiento válido.");
             }
+        }
+
+        private static void TestGameSessionControllerAsyncFlow()
+        {
+            var session = new GameSessionController(SessionMode.HumanVsBotX, BotDifficulty.Easy);
+            int stateChangedEvents = 0;
+            session.StateChanged += () => stateChangedEvents++;
+
+            // 1. Humano (X) juega en (4, 4)
+            Assert(session.TryPlayHumanMove(4, 4), "El movimiento humano inicial (4,4) debe ser aceptado.");
+            Assert(session.IsCurrentTurnBot(), "Después del tiro humano debe ser turno del Bot O.");
+
+            // 2. Bot (O) calcula y juega asíncronamente en hilo de fondo
+            MinimaxSearchResult? botRes = session.PlayBotTurnAsync().GetAwaiter().GetResult();
+            Assert(botRes.HasValue, "PlayBotTurnAsync debe retornar un resultado de búsqueda.");
+            Assert(session.State.MoveCount == 2, "Deben existir 2 movimientos en el tablero (Humano + Bot).");
+            Assert(!session.IsCurrentTurnBot(), "El turno debe regresar al humano (X).");
+
+            // 3. Undo en modo Humano vs Bot debe deshacer los 2 medios turnos para regresar al turno humano
+            Assert(session.Undo(), "Undo debe ejecutarse correctamente.");
+            Assert(session.State.MoveCount == 0 && session.State.CurrentPlayer == Player.X, "Undo contra Bot debe regresar al turno de X.");
+            Assert(session.Redo(), "Redo debe restaurar ambos movimientos.");
+            Assert(session.State.MoveCount == 2, "Tras Redo deben existir 2 movimientos nuevamente.");
+            Assert(stateChangedEvents >= 4, "El controlador debe emitir eventos StateChanged para actualizar la UI de Godot.");
         }
 
         private static void Assert(bool condition, string message)
