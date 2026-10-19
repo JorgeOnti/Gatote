@@ -4,8 +4,9 @@ using System.Collections.Generic;
 namespace FractalTicTacToe.Core
 {
     /// <summary>
-    /// Gestiona el estado completo y las reglas del juego Fractal Tic-Tac-Toe (Muerte Súbita).
-    /// Diseñado sin dependencias externas y optimizado para búsqueda adversarial (Minimax + Zobrist Hashing).
+    /// Gestiona el estado completo, el historial de movimientos (Undo/Redo) y las reglas
+    /// del juego Fractal Tic-Tac-Toe (Muerte Súbita).
+    /// Diseñado sin dependencias externas y optimizado para Minimax y sincronización en red.
     /// </summary>
     public sealed class GameState
     {
@@ -15,9 +16,16 @@ namespace FractalTicTacToe.Core
         public const int FreeMoveBoardIndex = -1;
 
         /// <summary>
-        /// Patrones ganadores de 3 en raya dentro de cualquier tablero pequeño (índices 0..8).
-        /// Aplanado en ternas para iteración rápida sin saltos de puntero.
+        /// Instantánea ligera de transición previa para deshacer un movimiento en O(1) exacto.
         /// </summary>
+        private struct MoveUndoRecord
+        {
+            public Move Move;
+            public Player PlayerWhoMoved;
+            public int PreviousActiveBoardIndex;
+            public ulong PreviousZobristKey;
+        }
+
         private static readonly int[] WinPatterns =
         {
             0, 1, 2, // Fila superior
@@ -36,7 +44,13 @@ namespace FractalTicTacToe.Core
         // Contador de fichas por cada sub-tablero (0..9) para verificar saturación en O(1)
         private readonly byte[] _boardOccupancy;
 
-        // Total de movimientos realizados en la partida (0..81)
+        // Pilas pre-asignadas de tamaño fijo (81) para Undo/Redo sin asignaciones en el heap
+        private readonly MoveUndoRecord[] _undoStack;
+        private readonly Move[] _redoStack;
+        private int _undoCount;
+        private int _redoCount;
+
+        // Total de movimientos realizados en el tablero actual (0..81)
         private int _totalMoves;
 
         public Player CurrentPlayer { get; private set; }
@@ -44,6 +58,11 @@ namespace FractalTicTacToe.Core
         public bool IsGameOver { get; private set; }
         public Player Winner { get; private set; }
         public int MoveCount => _totalMoves;
+
+        public bool CanUndo => _undoCount > 0;
+        public bool CanRedo => _redoCount > 0;
+        public int UndoCount => _undoCount;
+        public int RedoCount => _redoCount;
 
         /// <summary>
         /// Hash Zobrist incremental de 64 bits que identifica unívocamente la posición,
@@ -55,12 +74,9 @@ namespace FractalTicTacToe.Core
         {
             _cells = new Player[TotalCells];
             _boardOccupancy = new byte[BoardCount];
-            _totalMoves = 0;
-            CurrentPlayer = Player.X;
-            ActiveBoardIndex = FreeMoveBoardIndex;
-            IsGameOver = false;
-            Winner = Player.None;
-            ZobristKey = ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
+            _undoStack = new MoveUndoRecord[TotalCells];
+            _redoStack = new Move[TotalCells];
+            Reset();
         }
 
         private GameState(GameState source)
@@ -71,6 +87,20 @@ namespace FractalTicTacToe.Core
             _boardOccupancy = new byte[BoardCount];
             Array.Copy(source._boardOccupancy, _boardOccupancy, BoardCount);
 
+            _undoStack = new MoveUndoRecord[TotalCells];
+            if (source._undoCount > 0)
+            {
+                Array.Copy(source._undoStack, _undoStack, source._undoCount);
+            }
+
+            _redoStack = new Move[TotalCells];
+            if (source._redoCount > 0)
+            {
+                Array.Copy(source._redoStack, _redoStack, source._redoCount);
+            }
+
+            _undoCount = source._undoCount;
+            _redoCount = source._redoCount;
             _totalMoves = source._totalMoves;
             CurrentPlayer = source.CurrentPlayer;
             ActiveBoardIndex = source.ActiveBoardIndex;
@@ -80,7 +110,24 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Crea una copia profunda e independiente del estado actual en O(1) para exploración con Minimax.
+        /// Reinicia el tablero y el historial a su estado inicial limpio.
+        /// </summary>
+        public void Reset()
+        {
+            Array.Clear(_cells, 0, TotalCells);
+            Array.Clear(_boardOccupancy, 0, BoardCount);
+            _undoCount = 0;
+            _redoCount = 0;
+            _totalMoves = 0;
+            CurrentPlayer = Player.X;
+            ActiveBoardIndex = FreeMoveBoardIndex;
+            IsGameOver = false;
+            Winner = Player.None;
+            ZobristKey = ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
+        }
+
+        /// <summary>
+        /// Crea una copia profunda e independiente del estado actual.
         /// </summary>
         public GameState Clone() => new GameState(this);
 
@@ -103,6 +150,32 @@ namespace FractalTicTacToe.Core
         public Player this[int boardIndex, int cellIndex] => GetCell(boardIndex, cellIndex);
 
         /// <summary>
+        /// Obtiene el último movimiento aplicado en la partida, o null si no hay movimientos en el historial.
+        /// </summary>
+        public Move? GetLastMove()
+        {
+            if (_undoCount == 0)
+            {
+                return null;
+            }
+
+            return _undoStack[_undoCount - 1].Move;
+        }
+
+        /// <summary>
+        /// Retorna la secuencia cronológica de movimientos aplicados desde el inicio del estado.
+        /// </summary>
+        public List<Move> GetMoveHistory()
+        {
+            var history = new List<Move>(_undoCount);
+            for (int i = 0; i < _undoCount; i++)
+            {
+                history.Add(_undoStack[i].Move);
+            }
+            return history;
+        }
+
+        /// <summary>
         /// Genera la lista de todos los movimientos legales disponibles en el turno actual.
         /// Altamente optimizado para Minimax (pre-asigna capacidad exacta para evitar realocaciones).
         /// </summary>
@@ -113,7 +186,6 @@ namespace FractalTicTacToe.Core
                 return new List<Move>(0);
             }
 
-            // Caso 1: Turno forzado en un único tablero macro (máximo 9 movimientos)
             if (ActiveBoardIndex != FreeMoveBoardIndex)
             {
                 int remainingInBoard = CellsPerBoard - _boardOccupancy[ActiveBoardIndex];
@@ -131,7 +203,6 @@ namespace FractalTicTacToe.Core
                 return forcedMoves;
             }
 
-            // Caso 2: Tiro libre en cualquier casilla vacía de cualquier tablero no saturado
             int remainingTotal = TotalCells - _totalMoves;
             var freeMoves = new List<Move>(remainingTotal);
 
@@ -180,21 +251,112 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Valida y aplica un movimiento al estado actual.
-        /// Actualiza condición de victoria por muerte súbita, empate global, redirección de tablero, turno y hash Zobrist.
+        /// Valida y aplica un movimiento al estado actual, registrándolo en la pila de Undo y limpiando Redo.
         /// </summary>
-        /// <param name="move">Movimiento a ejecutar.</param>
-        /// <returns>true si el movimiento fue legal y se aplicó; false en caso contrario.</returns>
         public bool MakeMove(Move move)
+        {
+            if (!ApplyMoveInternal(move))
+            {
+                return false;
+            }
+
+            // Al realizar un movimiento nuevo, se invalida cualquier línea futura de Redo
+            _redoCount = 0;
+            return true;
+        }
+
+        /// <summary>
+        /// Deshace el último movimiento realizado en O(1) y lo almacena en la pila de Redo.
+        /// </summary>
+        /// <returns>true si había un movimiento por deshacer; false en caso contrario.</returns>
+        public bool UndoMove()
+        {
+            if (_undoCount == 0)
+            {
+                return false;
+            }
+
+            MoveUndoRecord record = PopUndoInternal();
+            _redoStack[_redoCount++] = record.Move;
+            return true;
+        }
+
+        /// <summary>
+        /// Rehace el último movimiento deshecho previamente con <see cref="UndoMove"/>.
+        /// </summary>
+        /// <returns>true si había un movimiento en la pila de Redo; false en caso contrario.</returns>
+        public bool RedoMove()
+        {
+            if (_redoCount == 0)
+            {
+                return false;
+            }
+
+            Move moveToRedo = _redoStack[--_redoCount];
+            return ApplyMoveInternal(moveToRedo);
+        }
+
+        /// <summary>
+        /// Método interno de ultra-baja latencia usado por <see cref="MinimaxBot"/> para revertir un nodo
+        /// durante la búsqueda en el árbol sin alterar la pila de Redo.
+        /// </summary>
+        internal void UnmakeMoveForSearch()
+        {
+            PopUndoInternal();
+        }
+
+        /// <summary>
+        /// Reconstruye un estado directamente desde una instantánea externa (p. ej. cadena FEN).
+        /// </summary>
+        internal void LoadFromSnapshot(
+            Player[] cells,
+            Player currentPlayer,
+            int activeBoardIndex,
+            bool isGameOver,
+            Player winner)
+        {
+            Reset();
+
+            for (int board = 0; board < BoardCount; board++)
+            {
+                int baseOffset = board * CellsPerBoard;
+                for (int cell = 0; cell < CellsPerBoard; cell++)
+                {
+                    Player p = cells[baseOffset + cell];
+                    _cells[baseOffset + cell] = p;
+                    if (p != Player.None)
+                    {
+                        _boardOccupancy[board]++;
+                        _totalMoves++;
+                    }
+                }
+            }
+
+            CurrentPlayer = currentPlayer;
+            ActiveBoardIndex = isGameOver ? FreeMoveBoardIndex : activeBoardIndex;
+            IsGameOver = isGameOver;
+            Winner = winner;
+            ZobristKey = ZobristHasher.ComputeFullHash(this);
+        }
+
+        private bool ApplyMoveInternal(Move move)
         {
             if (!IsValidMove(move))
             {
                 return false;
             }
 
+            // Guardar instantánea de transición en la pila de Undo antes de mutar
+            _undoStack[_undoCount++] = new MoveUndoRecord
+            {
+                Move = move,
+                PlayerWhoMoved = CurrentPlayer,
+                PreviousActiveBoardIndex = ActiveBoardIndex,
+                PreviousZobristKey = ZobristKey
+            };
+
             int flatIndex = (move.BoardIndex * CellsPerBoard) + move.CellIndex;
 
-            // Retirar del hash el ActiveBoardIndex previo e incorporar la nueva ficha colocada
             ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
             ZobristKey ^= ZobristHasher.GetPieceKey(flatIndex, CurrentPlayer);
 
@@ -223,7 +385,6 @@ namespace FractalTicTacToe.Core
             }
 
             // 3. Redirección recíproca: la celda elegida define el siguiente tablero macro
-            // Si el tablero destino está saturado (9 casillas llenas), se otorga Tiro Libre (-1)
             int targetBoard = move.CellIndex;
             ActiveBoardIndex = IsBoardFull(targetBoard) ? FreeMoveBoardIndex : targetBoard;
             ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
@@ -235,21 +396,31 @@ namespace FractalTicTacToe.Core
             return true;
         }
 
-        /// <summary>
-        /// Determina si un sub-tablero específico tiene sus 9 casillas ocupadas.
-        /// </summary>
+        private MoveUndoRecord PopUndoInternal()
+        {
+            MoveUndoRecord record = _undoStack[--_undoCount];
+            int flatIndex = (record.Move.BoardIndex * CellsPerBoard) + record.Move.CellIndex;
+
+            _cells[flatIndex] = Player.None;
+            _boardOccupancy[record.Move.BoardIndex]--;
+            _totalMoves--;
+
+            CurrentPlayer = record.PlayerWhoMoved;
+            ActiveBoardIndex = record.PreviousActiveBoardIndex;
+            IsGameOver = false;
+            Winner = Player.None;
+            ZobristKey = record.PreviousZobristKey;
+
+            return record;
+        }
+
         private bool IsBoardFull(int boardIndex)
         {
             return _boardOccupancy[boardIndex] >= CellsPerBoard;
         }
 
-        /// <summary>
-        /// Verifica si el jugador especificado acaba de formar una línea de 3 en raya
-        /// dentro del tablero pequeño indicado.
-        /// </summary>
         private bool CheckBoardWin(int boardIndex, Player player)
         {
-            // Un jugador no puede tener 3 en raya en este sub-tablero si hay menos de 3 fichas en él
             if (_boardOccupancy[boardIndex] < 3)
             {
                 return false;

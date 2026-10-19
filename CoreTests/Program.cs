@@ -14,12 +14,15 @@ namespace CoreTests
             TestSuddenDeathVictory();
             TestFreeMoveOnSaturatedBoard();
             TestZobristIncrementalConsistencyAndTransposition();
+            TestUndoAndRedoMoveConsistency();
+            TestFenAndMoveHistorySerialization();
+            TestEloRatingAndMatchRecord();
             TestMinimaxImmediateSuddenDeathWin();
             TestMinimaxAvoidsSendingOpponentToLandmineBoard();
             TestTranspositionTableHitAndSpeedup();
             TestIterativeDeepeningTimeLimitAndDifficulties();
 
-            Console.WriteLine("¡Todas las pruebas de dominio, Zobrist Hashing, Tabla de Transposición e Iterative Deepening pasaron exitosamente!");
+            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO y Minimax pasaron exitosamente!");
             return 0;
         }
 
@@ -100,53 +103,6 @@ namespace CoreTests
 
         private static void TestZobristIncrementalConsistencyAndTransposition()
         {
-            // Verificar que dos órdenes de movimientos distintos que llegan a la misma posición
-            // producen exactamente el mismo ZobristKey incremental y coinciden con ComputeFullHash:
-            // Ruta A: X(4, 1) -> O(1, 2) -> X(2, 3) -> O(3, 4)
-            var pathA = new GameState();
-            Assert(pathA.MakeMove(new Move(4, 1)), "A1");
-            Assert(pathA.ZobristKey == ZobristHasher.ComputeFullHash(pathA), "Hash A1");
-            Assert(pathA.MakeMove(new Move(1, 2)), "A2");
-            Assert(pathA.ZobristKey == ZobristHasher.ComputeFullHash(pathA), "Hash A2");
-            Assert(pathA.MakeMove(new Move(2, 3)), "A3");
-            Assert(pathA.ZobristKey == ZobristHasher.ComputeFullHash(pathA), "Hash A3");
-            Assert(pathA.MakeMove(new Move(3, 4)), "A4");
-            Assert(pathA.ZobristKey == ZobristHasher.ComputeFullHash(pathA), "Hash A4");
-
-            // Ruta B (Transposición): X(2, 3) -> O(3, 4) -> X(4, 1) -> O(1, 2)... pero para que ActiveBoardIndex final sea 4:
-            // Necesitamos que las mismas fichas estén en: X en (4,1) y (2,3); O en (1,2) y (3,4), turno de X y ActiveBoardIndex = 4:
-            // Ruta B: X inicia con tiro libre en (2, 1) -> no, X necesita (4,1) y (2,3).
-            // Si X inicia en (4, 1) -> O va a 1.
-            // Probemos una transposición de 5 movimientos donde X tiene {(0,1), (2,3)}, O tiene {(1,2), (3,0)}, y X juega (0,4):
-            // Secuencia 1: X(0,1) -> O(1,2) -> X(2,3) -> O(3,0) -> X(0,4)
-            var seq1 = new GameState();
-            seq1.MakeMove(new Move(0, 1));
-            seq1.MakeMove(new Move(1, 2));
-            seq1.MakeMove(new Move(2, 3));
-            seq1.MakeMove(new Move(3, 0));
-            seq1.MakeMove(new Move(0, 4));
-
-            // Secuencia 2: X(2,3) -> O(3,0) -> X(0,1) -> O(1,2) -> no, desde 2 sería X(2,4).
-            // Para terminar en ActiveBoardIndex = 4 con las mismas fichas:
-            // En Secuencia 1: X tiene {(0,1), (2,3), (0,4)}, O tiene {(1,2), (3,0)}, ActiveBoard = 4, Turno = O.
-            // En Secuencia 2: X(0,4) -> O(4,2)? No, O necesita (3,0) y (1,2):
-            // X(2,3) -> O(3,0) -> X(0,1) -> O(1,0)? Si O tiene (1,0) y (3,0):
-            // Comparemos:
-            // S1: X(0,1) -> O(1,3) -> X(3,2) -> O(2,0) -> X(0,4)  (X: (0,1),(3,2),(0,4) | O: (1,3),(2,0) | Active: 4)
-            // S2: X(3,2) -> O(2,0) -> X(0,1) -> O(1,3) -> ¡Pero en S2 tras O(1,3) X está en 3, no en 0!
-            // Para que el último tiro de X sea en el mismo tablero (0,4), el penúltimo tiro de O debe enviar a X a 0:
-            // S1: X(0,1) -> O(1,2) -> X(2,3) -> O(3,0) -> X(0,4)
-            // S2: X(0,3)? No, las fichas de X deben ser idénticas: {(0,1), (2,3), (0,4)}.
-            // ¿Cómo puede X empezar en (0,4) o terminar en (0,4)?
-            // ¡Con un ciclo en otro tablero!
-            // S1: X(0,1) -> O(1,2) -> X(2,1) -> O(1,0) -> X(0,4)
-            //     Fichas X: (0,1), (2,1), (0,4) | Fichas O: (1,2), (1,0) | ActiveBoard: 4, Turno: O
-            // S2: X(2,1) -> O(1,0) -> X(0,1) -> O(1,2) -> ¡X está en 2, no en 0!
-            // Para que ambos terminen con el mismo último movimiento (X en (0,4)), el ciclo intermedio en el Tablero 0 se puede permutar:
-            // T1: X(0,1) -> O(1,0) -> X(0,2) -> O(2,0) -> X(0,4)
-            //     Fichas X: (0,1), (0,2), (0,4) | Fichas O: (1,0), (2,0) | ActiveBoard: 4, Turno: O
-            // T2: X(0,2) -> O(2,0) -> X(0,1) -> O(1,0) -> X(0,4)
-            //     Fichas X: (0,2), (0,1), (0,4) | Fichas O: (2,0), (1,0) | ActiveBoard: 4, Turno: O
             var t1 = new GameState();
             t1.MakeMove(new Move(0, 1));
             t1.MakeMove(new Move(1, 0));
@@ -163,6 +119,101 @@ namespace CoreTests
 
             Assert(t1.ZobristKey == t2.ZobristKey, "Dos secuencias transpuestas al mismo estado deben tener idéntico ZobristKey.");
             Assert(t1.ZobristKey == ZobristHasher.ComputeFullHash(t1), "El hash incremental debe coincidir con ComputeFullHash.");
+        }
+
+        private static void TestUndoAndRedoMoveConsistency()
+        {
+            var state = new GameState();
+            ulong initialHash = state.ZobristKey;
+
+            // Llevamos la partida hasta victoria por Muerte Súbita en 5 tiros:
+            state.MakeMove(new Move(0, 1));
+            ulong hashAfter1 = state.ZobristKey;
+            state.MakeMove(new Move(1, 0));
+            state.MakeMove(new Move(0, 2));
+            state.MakeMove(new Move(2, 0));
+            ulong hashBeforeWinningMove = state.ZobristKey;
+            state.MakeMove(new Move(0, 0)); // X gana por Muerte Súbita
+
+            Assert(state.IsGameOver && state.Winner == Player.X, "X debe haber ganado antes de Undo.");
+            Assert(state.CanUndo && !state.CanRedo, "Debe poder hacer Undo y no Redo.");
+
+            // Deshacer el tiro ganador
+            Assert(state.UndoMove(), "Undo del tiro ganador debe ser exitoso.");
+            Assert(!state.IsGameOver && state.Winner == Player.None, "Tras Undo ya no debe estar terminada la partida.");
+            Assert(state.CurrentPlayer == Player.X && state.ActiveBoardIndex == 0, "Debe volver a ser turno de X en el Tablero 0.");
+            Assert(state.ZobristKey == hashBeforeWinningMove, "El ZobristKey debe restaurarse exactamente tras Undo.");
+            Assert(state.CanRedo, "Debe existir 1 movimiento disponible en Redo.");
+
+            // Rehacer el tiro ganador con RedoMove()
+            Assert(state.RedoMove(), "Redo del tiro ganador debe ser exitoso.");
+            Assert(state.IsGameOver && state.Winner == Player.X, "Tras Redo, X vuelve a ser ganador.");
+            Assert(!state.CanRedo, "La pila de Redo debe quedar vacía.");
+
+            // Deshacer 4 movimientos hasta quedar en el movimiento 1
+            for (int i = 0; i < 4; i++)
+            {
+                Assert(state.UndoMove(), $"Undo paso {i}");
+            }
+            Assert(state.MoveCount == 1 && state.ZobristKey == hashAfter1, "El estado tras 4 Undos debe coincidir con el movimiento 1.");
+            Assert(state.RedoCount == 4, "Deben existir 4 movimientos en la pila de Redo.");
+
+            // Si ahora hacemos un movimiento nuevo distinto, la pila de Redo debe limpiarse
+            Assert(state.MakeMove(new Move(1, 4)), "Nuevo movimiento alternativo (1, 4)");
+            Assert(!state.CanRedo && state.RedoCount == 0, "Hacer un movimiento nuevo debe invalidar la pila de Redo.");
+
+            // Deshacer los 2 movimientos restantes hasta el inicio
+            Assert(state.UndoMove() && state.UndoMove(), "Deshacer hasta el origen");
+            Assert(!state.CanUndo && state.MoveCount == 0 && state.ZobristKey == initialHash, "El tablero debe regresar intacto al estado inicial.");
+        }
+
+        private static void TestFenAndMoveHistorySerialization()
+        {
+            var original = new GameState();
+            original.MakeMove(new Move(4, 4));
+            original.MakeMove(new Move(4, 0));
+            original.MakeMove(new Move(0, 8));
+            original.MakeMove(new Move(8, 2));
+
+            // 1. Prueba de exportación/importación FEN
+            string fen = GameSerializer.ToFen(original);
+            GameState fromFen = GameSerializer.FromFen(fen);
+
+            Assert(fromFen.ZobristKey == original.ZobristKey, "El estado reconstruido desde FEN debe tener el mismo ZobristKey.");
+            Assert(fromFen.CurrentPlayer == original.CurrentPlayer, "El jugador activo desde FEN debe coincidir.");
+            Assert(fromFen.ActiveBoardIndex == original.ActiveBoardIndex, "El tablero activo desde FEN debe coincidir.");
+            Assert(fromFen.MoveCount == original.MoveCount, "El conteo de fichas desde FEN debe coincidir.");
+
+            // 2. Prueba de exportación/importación de transcripción de movimientos ("44-40-08-82")
+            string transcript = GameSerializer.ExportMoveHistory(original);
+            Assert(transcript == "44-40-08-82", $"Transcripción esperada '44-40-08-82', obtenida '{transcript}'.");
+
+            GameState fromTranscript = GameSerializer.ImportMoveHistory(transcript);
+            Assert(fromTranscript.ZobristKey == original.ZobristKey, "El estado importado por transcripción debe tener idéntico ZobristKey.");
+            Assert(fromTranscript.CanUndo && fromTranscript.UndoCount == 4, "La importación por transcripción debe preservar la pila de Undo.");
+        }
+
+        private static void TestEloRatingAndMatchRecord()
+        {
+            var playerX = new PlayerProfile("id-x", "Alice", 1200);
+            var playerO = new PlayerProfile("id-o", "Bob", 1200);
+
+            var game = GameSerializer.ImportMoveHistory("01-10-02-20-00"); // X gana en 5 tiros
+            Assert(game.IsGameOver && game.Winner == Player.X, "X debe ganar la partida de prueba.");
+
+            MatchRecord record = MatchRecord.CreateFromGame(game, playerX, playerO, updateProfilesIfGameOver: true);
+            Assert(record.PlayerXEloBefore == 1200 && record.PlayerOEloBefore == 1200, "ELO inicial debe ser 1200.");
+            Assert(record.PlayerXEloAfter == 1220 && record.PlayerOEloAfter == 1180, $"Con K=40 provisional, el ganador sube +20 (1220) y el perdedor baja -20 (1180). Obtenido: {record.PlayerXEloAfter}/{record.PlayerOEloAfter}");
+            Assert(playerX.Wins == 1 && playerO.Losses == 1, "Los perfiles deben registrar la victoria y derrota.");
+
+            // Serializar y deserializar el MatchRecord en texto PGN
+            string pgnText = record.SerializeToText();
+            MatchRecord restoredRecord = MatchRecord.DeserializeFromText(pgnText);
+            Assert(restoredRecord.PlayerXName == "Alice" && restoredRecord.PlayerOName == "Bob", "Nombres en PGN deben conservarse.");
+            Assert(restoredRecord.PlayerXEloAfter == 1220 && restoredRecord.PlayerOEloAfter == 1180, "Transición ELO en PGN debe conservarse.");
+
+            GameState restoredGame = restoredRecord.ReconstructGameState();
+            Assert(restoredGame.IsGameOver && restoredGame.Winner == Player.X && restoredGame.MoveCount == 5, "La partida reconstruida desde el MatchRecord debe ser idéntica.");
         }
 
         private static void TestMinimaxImmediateSuddenDeathWin()
@@ -182,9 +233,9 @@ namespace CoreTests
         private static void TestMinimaxAvoidsSendingOpponentToLandmineBoard()
         {
             var state = new GameState();
-            state.MakeMove(new Move(0, 1)); // X en (0,1) -> O va a 1
-            state.MakeMove(new Move(1, 0)); // O en (1,0) -> X va a 0
-            state.MakeMove(new Move(0, 2)); // X en (0,2) -> O va a 2 (Tablero 0 queda minado con 2 en raya de X)
+            state.MakeMove(new Move(0, 1));
+            state.MakeMove(new Move(1, 0));
+            state.MakeMove(new Move(0, 2));
 
             var bot = new MinimaxBot(BotDifficulty.Hard);
             Move bestMove = bot.GetBestMove(state);
@@ -205,7 +256,6 @@ namespace CoreTests
             Assert(resTT.MaxDepthReached == 6, $"Debe alcanzar profundidad 6, alcanzó {resTT.MaxDepthReached}.");
             Assert(resTT.TranspositionHits > 0, "La Tabla de Transposición debe registrar hits durante Iterative Deepening.");
 
-            // Segunda consulta sobre el mismo estado: debe aprovechar la tabla de transposición aún más rápido
             MinimaxSearchResult cachedRes = botWithTT.FindBestMove(state);
             Assert(cachedRes.BestMove == resTT.BestMove, "La jugada óptima con TT caliente debe ser consistente.");
             Assert(cachedRes.TranspositionCutoffs > 0, "Debe producir podas directas desde la Tabla de Transposición.");
@@ -216,14 +266,12 @@ namespace CoreTests
             var state = new GameState();
             state.MakeMove(new Move(4, 4));
 
-            // Probar límite de tiempo estricto (25 ms) con profundidad alta (9)
             var fastBot = new MinimaxBot(maxDepth: 9, timeLimitMs: 25, useTranspositionTable: true);
             MinimaxSearchResult result = fastBot.FindBestMove(state);
 
             Assert(result.MaxDepthReached >= 1, "Iterative Deepening siempre debe completar al menos profundidad 1.");
             Assert(state.IsValidMove(result.BestMove), "El movimiento retornado bajo límite de tiempo debe ser legal.");
 
-            // Probar todos los niveles de dificultad preconfigurados
             foreach (BotDifficulty diff in new[] { BotDifficulty.Easy, BotDifficulty.Medium, BotDifficulty.Hard })
             {
                 var presetBot = new MinimaxBot(diff);

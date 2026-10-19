@@ -17,6 +17,8 @@ project.lock.json
 project.fragment.lock.json
 artifacts/
 
-## OS generated
+## OS generated & local match exports
 .DS_Store
 Thumbs.db
+*.fttt
+

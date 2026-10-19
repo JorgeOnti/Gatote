@@ -69,7 +69,7 @@ namespace FractalTicTacToe.Core
 
     /// <summary>
     /// Agente de Inteligencia Artificial basado en Negamax/Minimax con poda Alfa-Beta,
-    /// Tabla de Transposición Zobrist, Iterative Deepening por tiempo límite y niveles de dificultad.
+    /// Make/Unmake en O(1), Tabla de Transposición Zobrist, Iterative Deepening y niveles de dificultad.
     /// </summary>
     public sealed class MinimaxBot
     {
@@ -80,8 +80,6 @@ namespace FractalTicTacToe.Core
         private const int UnsafeRedirectionPenalty = 250;
         private const int TimeCheckIntervalMask = 255; // Verificar reloj cada 256 nodos
 
-        // Pesos posicionales de cada celda (0..8) según el número de líneas ganadoras en las que participa:
-        // Centro (4 líneas) = 16, Esquinas (3 líneas) = 9, Bordes (2 líneas) = 4
         private static readonly int[] CellPositionalWeights =
         {
             9,  4,  9,
@@ -209,7 +207,7 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Ejecuta búsqueda con Iterative Deepening, poda Alfa-Beta y Tabla de Transposición Zobrist.
+        /// Ejecuta búsqueda con Iterative Deepening, poda Alfa-Beta, Make/Unmake in-place y Tabla Zobrist.
         /// </summary>
         public MinimaxSearchResult FindBestMove(GameState state)
         {
@@ -234,7 +232,6 @@ namespace FractalTicTacToe.Core
             _transpositionTable?.ResetMetrics();
             _searchTimer.Restart();
 
-            // Si es el primer tiro de la partida (81 opciones libres), acotamos la profundidad máxima de apertura
             int targetMaxDepth = state.MoveCount == 0 ? Math.Min(MaxDepth, 5) : MaxDepth;
 
             // 1. Atajo de victoria inmediata en 1 turno (Muerte Súbita)
@@ -285,6 +282,9 @@ namespace FractalTicTacToe.Core
 
             OrderMovesInPlace(state, legalMoves, rootPlayer, hashMove);
 
+            // Clonamos una única vez para ejecutar MakeMove / UnmakeMoveForSearch en O(1) sin clonar en el árbol
+            GameState searchState = state.Clone();
+
             Move bestMoveOverall = legalMoves[0];
             int bestScoreOverall = 0;
             int completedDepth = 0;
@@ -292,7 +292,6 @@ namespace FractalTicTacToe.Core
             // 3. Bucle de Iterative Deepening (profundidad 1 .. targetMaxDepth)
             for (int currentDepth = 1; currentDepth <= targetMaxDepth; currentDepth++)
             {
-                // Siempre garantizamos completar al menos profundidad 1 antes de aplicar corte por reloj
                 _enforceTimeLimitInCurrentIteration = currentDepth > 1 && TimeLimitMs > 0;
                 _searchAborted = false;
 
@@ -301,7 +300,6 @@ namespace FractalTicTacToe.Core
                     break;
                 }
 
-                // Promover el mejor movimiento de la iteración previa (Principal Variation) al primer lugar
                 if (currentDepth > 1)
                 {
                     PromoteMoveToFront(legalMoves, bestMoveOverall);
@@ -315,14 +313,15 @@ namespace FractalTicTacToe.Core
                 for (int i = 0; i < legalMoves.Count; i++)
                 {
                     Move move = legalMoves[i];
-                    GameState childState = state.Clone();
-                    childState.MakeMove(move);
+                    searchState.MakeMove(move);
 
                     int score = -Negamax(
-                        childState,
+                        searchState,
                         currentDepth - 1,
                         -beta,
                         -alpha);
+
+                    searchState.UnmakeMoveForSearch();
 
                     if (_searchAborted)
                     {
@@ -341,7 +340,6 @@ namespace FractalTicTacToe.Core
                     }
                 }
 
-                // Si la iteración se abortó a la mitad por tiempo límite, conservamos el resultado completo de la profundidad previa
                 if (_searchAborted)
                 {
                     break;
@@ -358,7 +356,6 @@ namespace FractalTicTacToe.Core
                     TranspositionFlag.Exact,
                     bestMoveOverall);
 
-                // Corte temprano si ya encontramos una secuencia de victoria forzada o derrota inevitable
                 if (bestScoreOverall >= WinScore - 1000 || bestScoreOverall <= -WinScore + 1000)
                 {
                     break;
@@ -379,10 +376,6 @@ namespace FractalTicTacToe.Core
                 _searchTimer.ElapsedMilliseconds);
         }
 
-        /// <summary>
-        /// Algoritmo Negamax con poda Alfa-Beta y consulta/escritura en Tabla de Transposición Zobrist.
-        /// Retorna la evaluación desde la perspectiva de <c>state.CurrentPlayer</c>.
-        /// </summary>
         private int Negamax(GameState state, int depth, int alpha, int beta)
         {
             if (_enforceTimeLimitInCurrentIteration &&
@@ -395,7 +388,6 @@ namespace FractalTicTacToe.Core
 
             LastNodesEvaluated++;
 
-            // 1. Estado terminal (Victoria por muerte súbita o empate global)
             if (state.IsGameOver)
             {
                 if (state.Winner == Player.None)
@@ -403,9 +395,6 @@ namespace FractalTicTacToe.Core
                     return 0;
                 }
 
-                // En Negamax, si el estado ya terminó tras el tiro del jugador anterior,
-                // el ganador es quien acaba de tirar (el oponente de state.CurrentPlayer).
-                // Aun así verificamos explícitamente quién ganó respecto a state.CurrentPlayer:
                 return state.Winner == state.CurrentPlayer
                     ? WinScore + (depth * 100)
                     : -WinScore - (depth * 100);
@@ -414,7 +403,6 @@ namespace FractalTicTacToe.Core
             int originalAlpha = alpha;
             Move? hashMove = null;
 
-            // 2. Consulta en la Tabla de Transposición Zobrist
             if (_transpositionTable != null &&
                 _transpositionTable.TryProbe(state.ZobristKey, out TranspositionEntry ttEntry))
             {
@@ -445,7 +433,6 @@ namespace FractalTicTacToe.Core
                 }
             }
 
-            // 3. Caso base de profundidad -> Evaluación heurística estática relativa al jugador en turno
             if (depth <= 0)
             {
                 return EvaluateStateInternal(state, state.CurrentPlayer, _botThreatsBuffer, _oppThreatsBuffer);
@@ -453,7 +440,6 @@ namespace FractalTicTacToe.Core
 
             List<Move> legalMoves = state.GetLegalMoves();
 
-            // 4. Ordenamiento de movimientos usando el HashMove (Principal Variation) + heurística táctica
             if (legalMoves.Count > 1 && (depth >= 2 || hashMove.HasValue))
             {
                 OrderMovesInPlace(state, legalMoves, state.CurrentPlayer, hashMove);
@@ -465,10 +451,11 @@ namespace FractalTicTacToe.Core
             for (int i = 0; i < legalMoves.Count; i++)
             {
                 Move move = legalMoves[i];
-                GameState child = state.Clone();
-                child.MakeMove(move);
+                state.MakeMove(move);
 
-                int score = -Negamax(child, depth - 1, -beta, -alpha);
+                int score = -Negamax(state, depth - 1, -beta, -alpha);
+
+                state.UnmakeMoveForSearch();
 
                 if (_searchAborted)
                 {
@@ -492,7 +479,6 @@ namespace FractalTicTacToe.Core
                 }
             }
 
-            // 5. Almacenar resultado en la Tabla de Transposición si la búsqueda no fue abortada
             if (_transpositionTable != null && !_searchAborted)
             {
                 TranspositionFlag flag;
@@ -541,7 +527,6 @@ namespace FractalTicTacToe.Core
 
             for (int board = 0; board < GameState.BoardCount; board++)
             {
-                // 1. Control posicional de celdas individuales (Centro > Esquinas > Bordes)
                 for (int cell = 0; cell < GameState.CellsPerBoard; cell++)
                 {
                     Player occupant = state.GetCell(board, cell);
@@ -555,7 +540,6 @@ namespace FractalTicTacToe.Core
                     }
                 }
 
-                // 2. Evaluación de las 8 líneas ganadoras de este sub-tablero
                 for (int lineIdx = 0; lineIdx < WinLines.Length; lineIdx += 3)
                 {
                     Player c0 = state.GetCell(board, WinLines[lineIdx]);
@@ -593,7 +577,6 @@ namespace FractalTicTacToe.Core
                 }
             }
 
-            // 3. Evaluación táctica del jugador con el turno actual (Tempo de Muerte Súbita)
             int activeBoard = state.ActiveBoardIndex;
             if (state.CurrentPlayer == perspectivePlayer)
             {
@@ -660,10 +643,6 @@ namespace FractalTicTacToe.Core
             }
         }
 
-        /// <summary>
-        /// Ordena los movimientos candidatos in-place de mayor a menor prioridad táctica
-        /// priorizando el HashMove de la Tabla de Transposición y usando Insertion Sort sin asignaciones de delegados.
-        /// </summary>
         private static void OrderMovesInPlace(GameState state, List<Move> moves, Player currentPlayer, Move? hashMove)
         {
             int count = moves.Count;
@@ -680,7 +659,7 @@ namespace FractalTicTacToe.Core
                 Move move = moves[i];
                 if (hashMove.HasValue && move.Equals(hashMove.Value))
                 {
-                    scores[i] = 2_000_000; // Prioridad máxima: Principal Variation de la Tabla de Transposición
+                    scores[i] = 2_000_000;
                 }
                 else
                 {

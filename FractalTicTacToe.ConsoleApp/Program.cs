@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using System.Threading;
 using FractalTicTacToe.Core;
@@ -16,43 +17,80 @@ namespace FractalTicTacToe.ConsoleApp
 
     public static class Program
     {
+        private const string DefaultSaveFileName = "partida_fractal.fttt";
+
         public static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
 
             GameMode mode = SelectGameMode(args, out MinimaxBot bot);
+            CreateDefaultProfiles(mode, bot, out PlayerProfile profileX, out PlayerProfile profileO);
 
             var state = new GameState();
-            Move? lastMove = null;
             string statusMessage = $"Modo activo: {GetModeDescription(mode, bot)}";
             bool isErrorMessage = false;
+            bool eloAppliedForCurrentGame = false;
+            EloMatchUpdate? lastEloUpdate = null;
 
             while (true)
             {
-                RenderScreen(state, lastMove, statusMessage, isErrorMessage, mode, bot);
+                if (state.IsGameOver && !eloAppliedForCurrentGame)
+                {
+                    EloMatchUpdate update = EloRatingCalculator.CalculateMatchRatingChange(
+                        profileX.EloRating,
+                        profileX.GamesPlayed,
+                        profileO.EloRating,
+                        profileO.GamesPlayed,
+                        state.Winner);
+
+                    profileX.ApplyMatchResult(Player.X, state.Winner, update.NewRatingX);
+                    profileO.ApplyMatchResult(Player.O, state.Winner, update.NewRatingO);
+                    lastEloUpdate = update;
+                    eloAppliedForCurrentGame = true;
+                }
+
+                RenderScreen(state, statusMessage, isErrorMessage, mode, bot, profileX, profileO);
                 statusMessage = null;
                 isErrorMessage = false;
 
                 if (state.IsGameOver)
                 {
-                    RenderGameOverBanner(state);
-                    Console.Write("\n¿Desean jugar otra partida? (s = sí / m = cambiar modo / n = salir): ");
+                    RenderGameOverBanner(state, profileX, profileO, lastEloUpdate);
+                    Console.Write("\n¿Acción? (s = nueva partida / u = deshacer último tiro / e = exportar / m = modo / n = salir): ");
                     string retry = Console.ReadLine()?.Trim().ToLowerInvariant();
+
+                    if (retry == "u" || retry == "undo")
+                    {
+                        if (PerformUndo(state, mode))
+                        {
+                            statusMessage = "Último movimiento deshecho. La partida continúa.";
+                        }
+                        continue;
+                    }
+
+                    if (retry == "e" || retry == "export")
+                    {
+                        statusMessage = ExportGameToDiskAndClipboardInfo(state, profileX, profileO);
+                        continue;
+                    }
 
                     if (retry == "m")
                     {
                         mode = SelectGameMode(Array.Empty<string>(), out bot);
-                        state = new GameState();
-                        lastMove = null;
+                        CreateDefaultProfiles(mode, bot, out profileX, out profileO);
+                        state.Reset();
+                        eloAppliedForCurrentGame = false;
+                        lastEloUpdate = null;
                         statusMessage = $"Modo cambiado a: {GetModeDescription(mode, bot)}";
                         continue;
                     }
 
                     if (retry == "s" || retry == "si" || retry == "sí" || retry == "y")
                     {
-                        state = new GameState();
+                        state.Reset();
                         bot.ClearTranspositionTable();
-                        lastMove = null;
+                        eloAppliedForCurrentGame = false;
+                        lastEloUpdate = null;
                         continue;
                     }
 
@@ -79,7 +117,6 @@ namespace FractalTicTacToe.ConsoleApp
                     }
 
                     state.MakeMove(searchResult.BestMove);
-                    lastMove = searchResult.BestMove;
                     statusMessage =
                         $"Bot ({botPlayer}) jugó {searchResult.BestMove} | " +
                         $"Eval: {searchResult.Score} | Prof: {searchResult.MaxDepthReached}/{bot.MaxDepth} | " +
@@ -107,10 +144,66 @@ namespace FractalTicTacToe.ConsoleApp
                 if (string.Equals(trimmed, "r", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(trimmed, "reiniciar", StringComparison.OrdinalIgnoreCase))
                 {
-                    state = new GameState();
+                    state.Reset();
                     bot.ClearTranspositionTable();
-                    lastMove = null;
+                    eloAppliedForCurrentGame = false;
+                    lastEloUpdate = null;
                     statusMessage = "Partida y Tabla de Transposición reiniciadas.";
+                    continue;
+                }
+
+                if (string.Equals(trimmed, "u", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(trimmed, "undo", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (PerformUndo(state, mode))
+                    {
+                        statusMessage = "Movimiento deshecho (Undo).";
+                    }
+                    else
+                    {
+                        statusMessage = "No hay movimientos previos para deshacer.";
+                        isErrorMessage = true;
+                    }
+                    continue;
+                }
+
+                if (string.Equals(trimmed, "y", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(trimmed, "redo", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (PerformRedo(state, mode))
+                    {
+                        statusMessage = "Movimiento rehecho (Redo).";
+                    }
+                    else
+                    {
+                        statusMessage = "No hay movimientos en la pila de Redo.";
+                        isErrorMessage = true;
+                    }
+                    continue;
+                }
+
+                if (string.Equals(trimmed, "e", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(trimmed, "export", StringComparison.OrdinalIgnoreCase))
+                {
+                    statusMessage = ExportGameToDiskAndClipboardInfo(state, profileX, profileO);
+                    continue;
+                }
+
+                if (string.Equals(trimmed, "i", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(trimmed, "import", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (TryImportGameInteractive(out GameState importedState, out string importMsg))
+                    {
+                        state = importedState;
+                        bot.ClearTranspositionTable();
+                        eloAppliedForCurrentGame = state.IsGameOver;
+                        statusMessage = importMsg;
+                    }
+                    else
+                    {
+                        statusMessage = importMsg;
+                        isErrorMessage = true;
+                    }
                     continue;
                 }
 
@@ -118,8 +211,10 @@ namespace FractalTicTacToe.ConsoleApp
                     string.Equals(trimmed, "modo", StringComparison.OrdinalIgnoreCase))
                 {
                     mode = SelectGameMode(Array.Empty<string>(), out bot);
-                    state = new GameState();
-                    lastMove = null;
+                    CreateDefaultProfiles(mode, bot, out profileX, out profileO);
+                    state.Reset();
+                    eloAppliedForCurrentGame = false;
+                    lastEloUpdate = null;
                     statusMessage = $"Modo cambiado a: {GetModeDescription(mode, bot)}";
                     continue;
                 }
@@ -147,14 +242,154 @@ namespace FractalTicTacToe.ConsoleApp
                     isErrorMessage = true;
                     continue;
                 }
+            }
+        }
 
-                lastMove = move;
+        private static bool PerformUndo(GameState state, GameMode mode)
+        {
+            if (!state.CanUndo)
+            {
+                return false;
+            }
+
+            // En modo Humano vsHumano deshacemos 1 medio turno (ply).
+            // En modo Humano vs Bot deshacemos hasta regresar al turno del jugador humano.
+            state.UndoMove();
+            if ((mode == GameMode.HumanVsBotX || mode == GameMode.BotVsHumanO) &&
+                IsBotTurn(state.CurrentPlayer, mode) &&
+                state.CanUndo)
+            {
+                state.UndoMove();
+            }
+
+            return true;
+        }
+
+        private static bool PerformRedo(GameState state, GameMode mode)
+        {
+            if (!state.CanRedo)
+            {
+                return false;
+            }
+
+            state.RedoMove();
+            if ((mode == GameMode.HumanVsBotX || mode == GameMode.BotVsHumanO) &&
+                IsBotTurn(state.CurrentPlayer, mode) &&
+                state.CanRedo)
+            {
+                state.RedoMove();
+            }
+
+            return true;
+        }
+
+        private static string ExportGameToDiskAndClipboardInfo(
+            GameState state,
+            PlayerProfile profileX,
+            PlayerProfile profileO)
+        {
+            string fen = GameSerializer.ToFen(state);
+            string moves = GameSerializer.ExportMoveHistory(state);
+            MatchRecord record = MatchRecord.CreateFromGame(state, profileX, profileO, updateProfilesIfGameOver: false);
+
+            try
+            {
+                File.WriteAllText(DefaultSaveFileName, record.SerializeToText(), Encoding.UTF8);
+                return $"Exportado a '{DefaultSaveFileName}' | FEN: \"{fen}\" | Movs: \"{(string.IsNullOrEmpty(moves) ? "(vacío)" : moves)}\"";
+            }
+            catch (Exception ex)
+            {
+                return $"FEN: \"{fen}\" | Movs: \"{moves}\" (No se pudo escribir archivo: {ex.Message})";
+            }
+        }
+
+        private static bool TryImportGameInteractive(out GameState importedState, out string message)
+        {
+            importedState = null;
+            Console.WriteLine();
+            Console.Write($"  Ingresa cadena FEN, transcripción (ej. '01-10-02') o Enter para cargar '{DefaultSaveFileName}': ");
+            string raw = Console.ReadLine()?.Trim();
+
+            try
+            {
+                if (string.IsNullOrEmpty(raw))
+                {
+                    if (!File.Exists(DefaultSaveFileName))
+                    {
+                        message = $"No se encontró el archivo '{DefaultSaveFileName}'.";
+                        return false;
+                    }
+
+                    string fileContent = File.ReadAllText(DefaultSaveFileName, Encoding.UTF8);
+                    MatchRecord record = MatchRecord.DeserializeFromText(fileContent);
+                    importedState = record.ReconstructGameState();
+                    message = $"Partida cargada desde '{DefaultSaveFileName}' ({importedState.MoveCount} movimientos).";
+                    return true;
+                }
+
+                // Si contiene '/', es una cadena FEN
+                if (raw.Contains("/"))
+                {
+                    importedState = GameSerializer.FromFen(raw);
+                    message = $"Posición importada desde FEN ({importedState.MoveCount} fichas en el tablero).";
+                    return true;
+                }
+
+                // De lo contrario, se interpreta como transcripción de movimientos (ej. "01-10-02")
+                importedState = GameSerializer.ImportMoveHistory(raw);
+                message = $"Partida reconstruida con historial completo ({importedState.MoveCount} movimientos, Undo disponible).";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                message = $"Error al importar partida: {ex.Message}";
+                return false;
+            }
+        }
+
+        private static void CreateDefaultProfiles(
+            GameMode mode,
+            MinimaxBot bot,
+            out PlayerProfile profileX,
+            out PlayerProfile profileO)
+        {
+            int botElo = GetBotInitialElo(bot.Difficulty);
+
+            switch (mode)
+            {
+                case GameMode.HumanVsBotX:
+                    profileX = new PlayerProfile("human-1", "Jugador Humano", 1200);
+                    profileO = new PlayerProfile($"bot-{bot.Difficulty}", $"Bot Minimax ({bot.Difficulty})", botElo);
+                    break;
+                case GameMode.BotVsHumanO:
+                    profileX = new PlayerProfile($"bot-{bot.Difficulty}", $"Bot Minimax ({bot.Difficulty})", botElo);
+                    profileO = new PlayerProfile("human-1", "Jugador Humano", 1200);
+                    break;
+                case GameMode.BotVsBot:
+                    profileX = new PlayerProfile("bot-x", $"Bot X ({bot.Difficulty})", botElo);
+                    profileO = new PlayerProfile("bot-o", $"Bot O ({bot.Difficulty})", botElo);
+                    break;
+                default:
+                    profileX = new PlayerProfile("human-x", "Jugador X", 1200);
+                    profileO = new PlayerProfile("human-o", "Jugador O", 1200);
+                    break;
+            }
+        }
+
+        private static int GetBotInitialElo(BotDifficulty difficulty)
+        {
+            switch (difficulty)
+            {
+                case BotDifficulty.Easy: return 1000;
+                case BotDifficulty.Medium: return 1300;
+                case BotDifficulty.Hard: return 1650;
+                case BotDifficulty.Master: return 2050;
+                default: return 1600;
             }
         }
 
         private static GameMode SelectGameMode(string[] args, out MinimaxBot bot)
         {
-            // Si la entrada estándar está redirigida (ej. pruebas automatizadas por pipe), mantener 2P por defecto
             if (Console.IsInputRedirected && (args == null || args.Length == 0))
             {
                 bot = new MinimaxBot(BotDifficulty.Hard);
@@ -205,10 +440,10 @@ namespace FractalTicTacToe.ConsoleApp
 
             Console.WriteLine();
             Console.WriteLine("  Niveles de Dificultad del Bot:");
-            Console.WriteLine("    [1] Fácil      (Prof. 2 |  100 ms | Sin Tabla Zobrist)");
-            Console.WriteLine("    [2] Medio      (Prof. 4 |  350 ms | Con Tabla Zobrist)");
-            Console.WriteLine("    [3] Difícil    (Prof. 6 | 1000 ms | Iterative Deepening + Zobrist) [Por defecto]");
-            Console.WriteLine("    [4] Maestro    (Prof. 9 | 2500 ms | Iterative Deepening + Zobrist)");
+            Console.WriteLine("    [1] Fácil      (Prof. 2 |  100 ms | ~1000 ELO)");
+            Console.WriteLine("    [2] Medio      (Prof. 4 |  350 ms | ~1300 ELO)");
+            Console.WriteLine("    [3] Difícil    (Prof. 6 | 1000 ms | ~1650 ELO) [Por defecto]");
+            Console.WriteLine("    [4] Maestro    (Prof. 9 | 2500 ms | ~2050 ELO)");
             Console.WriteLine("    [5] Personalizado (Definir profundidad y límite de tiempo en ms)");
             Console.Write("  Selecciona dificultad (1-5) [Por defecto: 3]: ");
 
@@ -256,7 +491,7 @@ namespace FractalTicTacToe.ConsoleApp
 
         private static string GetModeDescription(GameMode mode, MinimaxBot bot)
         {
-            string botInfo = $"{bot.Difficulty} (Prof. máx {bot.MaxDepth}, {bot.TimeLimitMs} ms, TT={(bot.UseTranspositionTable ? "ON" : "OFF")})";
+            string botInfo = $"{bot.Difficulty} (Prof. máx {bot.MaxDepth}, {bot.TimeLimitMs} ms)";
             switch (mode)
             {
                 case GameMode.HumanVsBotX:
@@ -327,11 +562,12 @@ namespace FractalTicTacToe.ConsoleApp
 
         private static void RenderScreen(
             GameState state,
-            Move? lastMove,
             string statusMessage,
             bool isErrorMessage,
             GameMode mode,
-            MinimaxBot bot)
+            MinimaxBot bot,
+            PlayerProfile profileX,
+            PlayerProfile profileO)
         {
             try
             {
@@ -342,11 +578,17 @@ namespace FractalTicTacToe.ConsoleApp
                 // Ignorar si la consola está redirigida
             }
 
+            Move? lastMove = state.GetLastMove();
+
             WriteColoredLine("╔══════════════════════════════════════════════════════════════════════╗", ConsoleColor.Cyan);
             WriteColoredLine("║          FRACTAL TIC-TAC-TOE  •  MODO MUERTE SÚBITA (3 EN RAYA)     ║", ConsoleColor.Cyan);
             WriteColoredLine("╚══════════════════════════════════════════════════════════════════════╝", ConsoleColor.Cyan);
 
-            Console.WriteLine($"  Modo: {GetModeDescription(mode, bot)}");
+            Console.Write("  [X] ");
+            WriteColored($"{profileX}", ConsoleColor.Red);
+            Console.Write("   vs.   [O] ");
+            WriteColoredLine($"{profileO}", ConsoleColor.Blue);
+
             Console.Write("  Turno: ");
             if (state.IsGameOver)
             {
@@ -358,7 +600,7 @@ namespace FractalTicTacToe.ConsoleApp
                 WriteColored($"Jugador {state.CurrentPlayer}", playerColor);
             }
 
-            Console.Write($"   |   Movs: {state.MoveCount}/81   |   Zobrist: 0x{state.ZobristKey:X16}   |   Último: ");
+            Console.Write($"   |   Movs: {state.MoveCount}/81 (Redo: {state.RedoCount})   |   Último: ");
             if (lastMove.HasValue)
             {
                 WriteColoredLine($"B:{lastMove.Value.BoardIndex}, C:{lastMove.Value.CellIndex}", ConsoleColor.White);
@@ -405,11 +647,11 @@ namespace FractalTicTacToe.ConsoleApp
                 " │ 6 │ 7 │ 8 │",
                 " └───────────┘",
                 "",
-                "Leyenda y Comandos:",
-                " • Números grises (0-8): casilla disponible",
-                " • Borde/Título VERDE: tablero activo",
-                " • 'h' = sugerencia IA | 'm' = cambiar modo/dificultad",
-                " • 'r' = reiniciar     | 'q' = salir"
+                "Comandos rápidos:",
+                " • 'u' = Undo (deshacer) | 'y' = Redo (rehacer)",
+                " • 'e' = Exportar FEN/PGN| 'i' = Importar partida",
+                " • 'h' = Pista Minimax   | 'm' = Modo/Dificultad",
+                " • 'r' = Reiniciar       | 'q' = Salir"
             };
 
             int guideLineIndex = 0;
@@ -532,15 +774,19 @@ namespace FractalTicTacToe.ConsoleApp
 
             if (state.ActiveBoardIndex == GameState.FreeMoveBoardIndex)
             {
-                Console.Write("Ingresa 'Tablero Celda' (0-8 0-8) o 'h' para pista IA: ");
+                Console.Write("Ingresa 'Tablero Celda' (0-8 0-8) o comando (u/y/e/i/h): ");
             }
             else
             {
-                Console.Write($"Tablero #{state.ActiveBoardIndex} activo -> Ingresa 'Celda' (0-8) o 'h' para pista IA: ");
+                Console.Write($"Tablero #{state.ActiveBoardIndex} activo -> Ingresa 'Celda' (0-8) o comando (u/y/e/i/h): ");
             }
         }
 
-        private static void RenderGameOverBanner(GameState state)
+        private static void RenderGameOverBanner(
+            GameState state,
+            PlayerProfile profileX,
+            PlayerProfile profileO,
+            EloMatchUpdate? eloUpdate)
         {
             Console.WriteLine();
             WriteColoredLine("  ╔══════════════════════════════════════════════════════╗", ConsoleColor.Yellow);
@@ -556,6 +802,15 @@ namespace FractalTicTacToe.ConsoleApp
                 WriteColoredLine("  ║     ¡EMPATE GLOBAL! Las 81 casillas están llenas.   ║", ConsoleColor.Yellow);
             }
             WriteColoredLine("  ╚══════════════════════════════════════════════════════╝", ConsoleColor.Yellow);
+
+            if (eloUpdate.HasValue)
+            {
+                string signX = eloUpdate.Value.DeltaX >= 0 ? "+" : "";
+                string signO = eloUpdate.Value.DeltaO >= 0 ? "+" : "";
+                Console.WriteLine(
+                    $"  Rating ELO actualizado -> [X] {profileX.Username}: {eloUpdate.Value.NewRatingX} ({signX}{eloUpdate.Value.DeltaX}) | " +
+                    $"[O] {profileO.Username}: {eloUpdate.Value.NewRatingO} ({signO}{eloUpdate.Value.DeltaO})");
+            }
         }
 
         private static void WriteColored(string text, ConsoleColor color)
