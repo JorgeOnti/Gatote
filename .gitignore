@@ -21,11 +21,15 @@ artifacts/
 .DS_Store
 Thumbs.db
 *.fttt
+ServerData/
 
-## Godot 4 cache
+
+## Godot 4 cache & conversion backups
 .godot/
 .mono/
 data_*/
 android/
+*.old
+
 
 

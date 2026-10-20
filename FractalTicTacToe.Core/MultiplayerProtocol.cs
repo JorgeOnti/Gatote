@@ -1,0 +1,77 @@
+using System;
+
+namespace FractalTicTacToe.Core
+{
+    /// <summary>
+    /// Especificación y constructor de paquetes del protocolo de red en tiempo real para Fractal Tic-Tac-Toe.
+    /// Basado en tramas de texto delimitadas por pipe (<c>|</c>) sobre TCP/WebSockets sin dependencias externas.
+    /// </summary>
+    public static class MultiplayerProtocol
+    {
+        // Comandos Cliente -> Servidor
+        public const string CmdLogin = "LOGIN";                     // LOGIN|<username>
+        public const string CmdQueue = "QUEUE";                     // QUEUE|<maxEloGap>
+        public const string CmdMove = "MOVE";                       // MOVE|<roomId>|<boardIndex>|<cellIndex>
+        public const string CmdTakebackRequest = "TAKEBACK_REQ";    // TAKEBACK_REQ|<roomId>
+        public const string CmdTakebackRespond = "TAKEBACK_RESP";   // TAKEBACK_RESP|<roomId>|<ACCEPT|DECLINE>
+        public const string CmdResign = "RESIGN";                   // RESIGN|<roomId>
+        public const string CmdLeaderboard = "LEADERBOARD";         // LEADERBOARD
+        public const string CmdHistory = "HISTORY";                 // HISTORY|<username>
+
+        // Eventos Servidor -> Cliente
+        public const string EvtAuthOk = "AUTH_OK";                  // AUTH_OK|<playerId>|<username>|<elo>|<rank>
+        public const string EvtQueued = "QUEUED";                   // QUEUED|<elo>
+        public const string EvtMatchStart = "MATCH_START";          // MATCH_START|<roomId>|<assignedRole>|<userX>|<eloX>|<userO>|<eloO>|<fen>
+        public const string EvtStateSync = "STATE_SYNC";            // STATE_SYNC|<roomId>|<lastBoard>|<lastCell>|<fen>|<movesTranscript>
+        public const string EvtTakebackOffered = "TAKEBACK_OFFERED";// TAKEBACK_OFFERED|<roomId>|<requesterRole>|<pliesToUndo>
+        public const string EvtTakebackResolved = "TAKEBACK_RESOLVED";// TAKEBACK_RESOLVED|<roomId>|<ACCEPTED|DECLINED>|<fen>|<movesTranscript>
+        public const string EvtMatchEnd = "MATCH_END";              // MATCH_END|<roomId>|<winner>|<reason>|<newEloX>|<deltaX>|<newEloO>|<deltaO>|<fen>
+        public const string EvtError = "ERROR";                     // ERROR|<message>
+
+        public static string BuildLogin(string username) => $"{CmdLogin}|{Sanitize(username)}";
+        public static string BuildQueue(int maxEloGap = 400) => $"{CmdQueue}|{maxEloGap}";
+        public static string BuildMove(string roomId, Move move) => $"{CmdMove}|{roomId}|{move.BoardIndex}|{move.CellIndex}";
+        public static string BuildTakebackRequest(string roomId) => $"{CmdTakebackRequest}|{roomId}";
+        public static string BuildTakebackResponse(string roomId, bool accept) =>
+            $"{CmdTakebackRespond}|{roomId}|{(accept ? "ACCEPT" : "DECLINE")}";
+        public static string BuildResign(string roomId) => $"{CmdResign}|{roomId}";
+
+        public static string BuildAuthOk(PlayerProfile profile) =>
+            $"{EvtAuthOk}|{profile.PlayerId}|{profile.Username}|{profile.EloRating}|{profile.RankTitle}";
+
+        public static string BuildMatchStart(OnlineMatchRoom room, Player assignedRole) =>
+            $"{EvtMatchStart}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.EloRating}|" +
+            $"{room.PlayerO.Username}|{room.PlayerO.EloRating}|{GameSerializer.ToFen(room.State)}";
+
+        public static string BuildStateSync(OnlineMatchRoom room, Move lastMove) =>
+            $"{EvtStateSync}|{room.RoomId}|{lastMove.BoardIndex}|{lastMove.CellIndex}|" +
+            $"{GameSerializer.ToFen(room.State)}|{GameSerializer.ExportMoveHistory(room.State)}";
+
+        public static string BuildTakebackOffered(OnlineMatchRoom room, TakebackRequest request) =>
+            $"{EvtTakebackOffered}|{room.RoomId}|{request.RequesterRole}|{request.PliesToUndo}";
+
+        public static string BuildTakebackResolved(OnlineMatchRoom room, bool accepted) =>
+            $"{EvtTakebackResolved}|{room.RoomId}|{(accepted ? "ACCEPTED" : "DECLINED")}|" +
+            $"{GameSerializer.ToFen(room.State)}|{GameSerializer.ExportMoveHistory(room.State)}";
+
+        public static string BuildMatchEnd(OnlineMatchRoom room, MatchRecord record, EloMatchUpdate eloUpdate) =>
+            $"{EvtMatchEnd}|{room.RoomId}|{record.Winner}|{record.EndReason}|" +
+            $"{eloUpdate.NewRatingX}|{eloUpdate.DeltaX}|{eloUpdate.NewRatingO}|{eloUpdate.DeltaO}|{record.FinalFen}";
+
+        public static string BuildError(string message) => $"{EvtError}|{Sanitize(message)}";
+
+        public static string[] SplitPacket(string rawLine)
+        {
+            if (string.IsNullOrWhiteSpace(rawLine))
+            {
+                return Array.Empty<string>();
+            }
+            return rawLine.Trim().Split('|');
+        }
+
+        private static string Sanitize(string text)
+        {
+            return (text ?? string.Empty).Replace("|", "/").Replace("\r", " ").Replace("\n", " ").Trim();
+        }
+    }
+}

@@ -22,8 +22,9 @@ namespace CoreTests
             TestTranspositionTableHitAndSpeedup();
             TestIterativeDeepeningTimeLimitAndDifficulties();
             TestGameSessionControllerAsyncFlow();
+            TestOnlineMatchmakingAndMutualConsentTakeback();
 
-            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO, Sesión Móvil y Minimax pasaron exitosamente!");
+            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO, Sesión Móvil, Multijugador Online (Takeback) y Minimax pasaron exitosamente!");
             return 0;
         }
 
@@ -303,6 +304,58 @@ namespace CoreTests
             Assert(session.Redo(), "Redo debe restaurar ambos movimientos.");
             Assert(session.State.MoveCount == 2, "Tras Redo deben existir 2 movimientos nuevamente.");
             Assert(stateChangedEvents >= 4, "El controlador debe emitir eventos StateChanged para actualizar la UI de Godot.");
+        }
+
+        private static void TestOnlineMatchmakingAndMutualConsentTakeback()
+        {
+            var matchmaking = new MatchmakingService();
+            PlayerProfile alice = matchmaking.GetOrCreateAccount("Alice");
+            PlayerProfile bob = matchmaking.GetOrCreateAccount("Bob");
+
+            Assert(matchmaking.EnqueueOrMatchPlayer(alice.PlayerId) == null, "Alice queda en espera al ser la primera en la cola.");
+            OnlineMatchRoom room = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId);
+            Assert(room != null, "Al entrar Bob con el mismo ELO (1200), se debe crear una sala OnlineMatchRoom.");
+
+            string idX = room.PlayerX.PlayerId;
+            string idO = room.PlayerO.PlayerId;
+
+            // 1. Validar autoridad de turno (O no puede tirar en el turno de X)
+            Assert(!room.SubmitMove(idO, new Move(4, 4), out _), "El servidor debe rechazar un tiro fuera de turno.");
+
+            // 2. X juega (4, 4) y solicita deshacer su jugada (1 ply)
+            Assert(room.SubmitMove(idX, new Move(4, 4), out _), "X juega (4, 4) legalmente.");
+            Assert(room.State.MoveCount == 1, "Debe haber 1 movimiento en la sala.");
+
+            Assert(room.RequestTakeback(idX, out TakebackRequest req1, out _), "X solicita Takeback.");
+            Assert(req1.PliesToUndo == 1, "Como X acaba de tirar, el Takeback debe ser de 1 medio turno (1 ply).");
+
+            // 3. X intenta aceptar su propia solicitud -> el servidor debe impedirlo
+            Assert(!room.RespondToTakeback(idX, accept: true, out _), "El propio solicitante NO puede aceptar su propio Takeback.");
+            Assert(room.State.MoveCount == 1, "El movimiento sigue en pie.");
+
+            // 4. O rechaza la solicitud -> el tablero NO se deshace
+            Assert(room.RespondToTakeback(idO, accept: false, out _), "O rechaza el Takeback.");
+            Assert(room.State.MoveCount == 1 && !room.PendingTakeback.HasValue, "Tras el rechazo de O, el tablero conserva el movimiento.");
+
+            // 5. X vuelve a solicitar Takeback y ahora O lo ACEPTA -> se deshace la jugada
+            Assert(room.RequestTakeback(idX, out _, out _), "X vuelve a solicitar Takeback.");
+            Assert(room.RespondToTakeback(idO, accept: true, out _), "O acepta el Takeback.");
+            Assert(room.State.MoveCount == 0 && room.State.CurrentPlayer == Player.X, "Al aceptar O, la jugada se deshace y vuelve a ser turno de X.");
+
+            // 6. Prueba de Takeback de 2 medios turnos (cuando solicita quien tiene el turno actual):
+            Assert(room.SubmitMove(idX, new Move(4, 4), out _), "X juega (4, 4).");
+            Assert(room.SubmitMove(idO, new Move(4, 0), out _), "O juega (4, 0).");
+            Assert(room.State.MoveCount == 2 && room.State.CurrentPlayer == Player.X, "Turno de X con 2 movimientos.");
+
+            Assert(room.RequestTakeback(idX, out TakebackRequest req2, out _), "X solicita regresar a su turno anterior (2 plies).");
+            Assert(req2.PliesToUndo == 2, "Debe solicitar deshacer 2 medios turnos.");
+            Assert(room.RespondToTakeback(idO, accept: true, out _), "O acepta deshacer los 2 medios turnos.");
+            Assert(room.State.MoveCount == 0 && room.State.CurrentPlayer == Player.X, "El tablero regresa a 0 movimientos y turno de X.");
+
+            // 7. Rendición (Resign) actualiza el ELO y registra el MatchRecord en el historial de ambos
+            Assert(room.Resign(idO, out _), "O se rinde.");
+            Assert(room.IsMatchOver && room.EffectiveWinner == Player.X && room.EndReason == MatchEndReason.Resignation, "X gana por rendición de O.");
+            Assert(matchmaking.GetPlayerMatchHistory("Alice").Count == 1, "El historial de Alice debe contener la partida concluida.");
         }
 
         private static void Assert(bool condition, string message)
