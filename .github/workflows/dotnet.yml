@@ -1,0 +1,29 @@
+name: CI de .NET con Pruebas Unitarias
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Descargar el código del repositorio
+      uses: actions/checkout@v4
+
+    - name: Configurar el entorno de .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Restaurar dependencias (NuGet)
+      run: dotnet restore
+
+    - name: Compilar el proyecto completo
+      run: dotnet build --no-restore --configuration Release
+
+    - name: Ejecutar la Suite de Pruebas Personalizada
+      run: dotnet run --project CoreTests/CoreTests.csproj --configuration Release
