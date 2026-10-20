@@ -248,9 +248,9 @@ namespace FractalTicTacToe.Core
 
         /// <summary>
         /// Procesa un paquete proveniente del servidor y actualiza el estado local.
-        /// Expuesto como <c>internal</c> para pruebas deterministas del protocolo.
+        /// Expuesto como público para pruebas deterministas y transportes personalizados (WebSockets/WebRTC).
         /// </summary>
-        internal void ProcessServerPacket(string rawLine)
+        public void ProcessServerPacket(string rawLine)
         {
             string[] parts = MultiplayerProtocol.SplitPacket(rawLine);
             if (parts.Length == 0)
