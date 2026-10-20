@@ -32,6 +32,7 @@ namespace FractalTicTacToe.Core
         public int Draws { get; set; }
 
         public int GamesPlayed => Wins + Losses + Draws;
+        public double WinRatePercentage => GamesPlayed == 0 ? 0.0 : (Wins * 100.0) / GamesPlayed;
         public string RankTitle => EloRatingCalculator.GetRankTitle(EloRating);
 
         public PlayerProfile(string playerId, string username, int initialElo = EloRatingCalculator.DefaultInitialRating)

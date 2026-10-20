@@ -370,9 +370,9 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Reconstruye un estado directamente desde una instantánea externa (p. ej. cadena FEN).
+        /// Reconstruye un estado directamente desde una instantánea externa (p. ej. cadena FEN o editor de posiciones).
         /// </summary>
-        internal void LoadFromSnapshot(
+        public void LoadFromSnapshot(
             Player[] cells,
             Player currentPlayer,
             int activeBoardIndex,
