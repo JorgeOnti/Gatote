@@ -6,9 +6,11 @@ namespace FractalTicTacToe.GodotClient
 {
     /// <summary>
     /// Pantalla principal 2D optimizada para dispositivos móviles (Portrait 9:16) en Godot 4 (.NET / C#).
-    /// Soporta juego local (Humano vs. Bot Minimax en 4 dificultades y 2 Jugadores Pasa y Juega)
-    /// y juego Multijugador en Línea (<see cref="OnlineMultiplayerClient"/>) con Matchmaking por ELO
-    /// y confirmación de Takeback estilo ajedrez (Aceptar/Rechazar).
+    /// Incluye:
+    /// - Tarjeta izquierda SIEMPRE asignada al jugador local ("Tú") mostrando su ficha [X] u [O] y tarjeta derecha para el rival.
+    /// - Visualización de variación de Rating estilo Lichess (+20 / -20) junto al puntaje al finalizar la partida.
+    /// - Reloj dual de partida por jugador (Bullet 1+1, Blitz 3+0, Blitz 3+2, Rápida 5+0) con décimas de segundo bajo presión.
+    /// - Animaciones Tweens (Pop elástico al colocar ficha, pulso respiratorio en tableros activos y destello en la línea de 3 ganadora).
     /// </summary>
     public partial class MobileGameScreen : Control
     {
@@ -20,10 +22,18 @@ namespace FractalTicTacToe.GodotClient
         private readonly PanelContainer[] _macroBoardPanels = new PanelContainer[GameState.BoardCount];
         private readonly Button[,] _cellButtons = new Button[GameState.BoardCount, GameState.CellsPerBoard];
 
-        private Label _playerXTitleLabel;
-        private Label _playerXEloLabel;
-        private Label _playerOTitleLabel;
-        private Label _playerOEloLabel;
+        // Tarjeta Izquierda = SIEMPRE Jugador Local ("Tú") | Tarjeta Derecha = SIEMPRE Oponente
+        private PanelContainer _leftPlayerCard;
+        private Label _leftPlayerTitleLabel;
+        private Label _leftPlayerRatingLabel;
+        private Label _leftClockLabel;
+
+        private PanelContainer _rightPlayerCard;
+        private Label _rightPlayerTitleLabel;
+        private Label _rightPlayerRatingLabel;
+        private Label _rightClockLabel;
+
+        private PanelContainer _statusBannerPanel;
         private Label _statusBannerLabel;
         private Label _telemetryLabel;
 
@@ -37,13 +47,26 @@ namespace FractalTicTacToe.GodotClient
         private Label _takebackOfferLabel;
 
         private Button _modeButton;
+        private Button _timeControlButton;
         private Button _undoButton;
         private Button _redoButton;
         private Button _hintButton;
         private Button _newGameOrResignButton;
 
         private Move? _currentHintMove;
+        private Move? _lastAnimatedMove;
+        private bool _victoryLineAnimated;
         private int _presetIndex = 2; // Inicia en Humano vs Bot (Difícil)
+        private int _timeControlIndex = 2; // Inicia en Blitz 3+2
+        private double _pulseTime;
+
+        private static readonly TimeControlConfig[] TimeControls =
+        {
+            TimeControlConfig.Bullet1Plus1,
+            TimeControlConfig.Blitz3Plus0,
+            TimeControlConfig.Blitz3Plus2,
+            TimeControlConfig.Rapid5Plus0
+        };
 
         // Paleta de colores moderna (Dark Slate Mobile UI)
         private static readonly Color BgColor = new Color(0.06f, 0.08f, 0.12f);
@@ -53,11 +76,17 @@ namespace FractalTicTacToe.GodotClient
         private static readonly Color PlayerXColor = new Color(1.00f, 0.36f, 0.42f);
         private static readonly Color PlayerOColor = new Color(0.24f, 0.74f, 1.00f);
         private static readonly Color LastMoveHighlightColor = new Color(0.98f, 0.78f, 0.20f);
+        private static readonly Color WinningCellHighlightColor = new Color(0.20f, 0.98f, 0.58f);
         private static readonly Color HintHighlightColor = new Color(0.72f, 0.42f, 1.00f);
+        private static readonly Color PositiveDeltaColor = new Color(0.25f, 0.95f, 0.55f);
+        private static readonly Color NegativeDeltaColor = new Color(1.00f, 0.42f, 0.42f);
 
         public override void _Ready()
         {
-            _localSession = new GameSessionController(SessionMode.HumanVsBotX, BotDifficulty.Hard);
+            _localSession = new GameSessionController(
+                SessionMode.HumanVsBotX,
+                BotDifficulty.Hard,
+                timeControl: TimeControls[_timeControlIndex]);
             _localSession.StateChanged += OnAnySessionStateChanged;
 
             _onlineClient = new OnlineMultiplayerClient();
@@ -85,6 +114,23 @@ namespace FractalTicTacToe.GodotClient
             }
         }
 
+        public override void _Process(double delta)
+        {
+            _pulseTime += delta;
+
+            // 1. Actualizar reloj de partida en tiempo real
+            if (_isOnlineMode)
+            {
+                _onlineClient.TickClock(delta);
+            }
+            else
+            {
+                _localSession.TickClock(delta);
+            }
+
+            UpdateClockLabelsAndPulseGlow();
+        }
+
         private void BuildMobileLayout()
         {
             var background = new ColorRect { Color = BgColor };
@@ -93,23 +139,23 @@ namespace FractalTicTacToe.GodotClient
 
             var safeMargin = new MarginContainer();
             safeMargin.SetAnchorsPreset(LayoutPreset.FullRect);
-            safeMargin.AddThemeConstantOverride("margin_left", 28);
-            safeMargin.AddThemeConstantOverride("margin_right", 28);
-            safeMargin.AddThemeConstantOverride("margin_top", 36);
-            safeMargin.AddThemeConstantOverride("margin_bottom", 36);
+            safeMargin.AddThemeConstantOverride("margin_left", 26);
+            safeMargin.AddThemeConstantOverride("margin_right", 26);
+            safeMargin.AddThemeConstantOverride("margin_top", 32);
+            safeMargin.AddThemeConstantOverride("margin_bottom", 32);
             AddChild(safeMargin);
 
             var mainColumn = new VBoxContainer();
-            mainColumn.AddThemeConstantOverride("separation", 18);
+            mainColumn.AddThemeConstantOverride("separation", 14);
             safeMargin.AddChild(mainColumn);
 
-            // 1. Encabezado y Tarjetas de Jugadores (ELO & Rango)
+            // 1. Encabezado y Tarjetas de Jugadores (Izquierda = Tú, Derecha = Rival, con Reloj y Rating)
             BuildHeaderAndProfiles(mainColumn);
 
             // 2. Barra de Conexión Online (visible solo cuando se elige Modo Online)
             BuildOnlineConnectionPanel(mainColumn);
 
-            // 3. Banner de Confirmación de Takeback del Rival (visible cuando el oponente solicita deshacer)
+            // 3. Banner de Confirmación de Takeback del Rival
             BuildTakebackConsentBanner(mainColumn);
 
             // 4. Banner de Estado (Turno / Tablero Forzado / Victoria por Muerte Súbita)
@@ -124,7 +170,7 @@ namespace FractalTicTacToe.GodotClient
                 HorizontalAlignment = HorizontalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
-            _telemetryLabel.AddThemeFontSizeOverride("font_size", 20);
+            _telemetryLabel.AddThemeFontSizeOverride("font_size", 19);
             _telemetryLabel.AddThemeColorOverride("font_color", new Color(0.65f, 0.72f, 0.82f));
             mainColumn.AddChild(_telemetryLabel);
 
@@ -139,7 +185,7 @@ namespace FractalTicTacToe.GodotClient
                 Text = "FRACTAL TIC-TAC-TOE • MUERTE SÚBITA",
                 HorizontalAlignment = HorizontalAlignment.Center
             };
-            titleLabel.AddThemeFontSizeOverride("font_size", 32);
+            titleLabel.AddThemeFontSizeOverride("font_size", 30);
             titleLabel.AddThemeColorOverride("font_color", new Color(0.92f, 0.96f, 1.0f));
             parent.AddChild(titleLabel);
 
@@ -147,34 +193,58 @@ namespace FractalTicTacToe.GodotClient
             {
                 SizeFlagsHorizontal = SizeFlags.ExpandFill
             };
-            profilesRow.AddThemeConstantOverride("separation", 16);
+            profilesRow.AddThemeConstantOverride("separation", 14);
             parent.AddChild(profilesRow);
 
-            var cardX = CreateStyledPanel(CardBgColor, PlayerXColor, borderWidth: 3, cornerRadius: 14);
-            cardX.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-            var boxX = new VBoxContainer();
-            _playerXTitleLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
-            _playerXTitleLabel.AddThemeFontSizeOverride("font_size", 24);
-            _playerXTitleLabel.AddThemeColorOverride("font_color", PlayerXColor);
-            _playerXEloLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
-            _playerXEloLabel.AddThemeFontSizeOverride("font_size", 20);
-            boxX.AddChild(_playerXTitleLabel);
-            boxX.AddChild(_playerXEloLabel);
-            cardX.AddChild(boxX);
-            profilesRow.AddChild(cardX);
+            // Tarjeta Izquierda: SIEMPRE Jugador Local ("Tú")
+            _leftPlayerCard = CreateStyledPanel(CardBgColor, PlayerXColor, borderWidth: 3, cornerRadius: 14, contentMargin: 12);
+            _leftPlayerCard.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+            var leftBox = new VBoxContainer();
+            leftBox.AddThemeConstantOverride("separation", 4);
 
-            var cardO = CreateStyledPanel(CardBgColor, PlayerOColor, borderWidth: 3, cornerRadius: 14);
-            cardO.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-            var boxO = new VBoxContainer();
-            _playerOTitleLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
-            _playerOTitleLabel.AddThemeFontSizeOverride("font_size", 24);
-            _playerOTitleLabel.AddThemeColorOverride("font_color", PlayerOColor);
-            _playerOEloLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
-            _playerOEloLabel.AddThemeFontSizeOverride("font_size", 20);
-            boxO.AddChild(_playerOTitleLabel);
-            boxO.AddChild(_playerOEloLabel);
-            cardO.AddChild(boxO);
-            profilesRow.AddChild(cardO);
+            _leftPlayerTitleLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
+            _leftPlayerTitleLabel.AddThemeFontSizeOverride("font_size", 22);
+
+            _leftPlayerRatingLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
+            _leftPlayerRatingLabel.AddThemeFontSizeOverride("font_size", 19);
+
+            _leftClockLabel = new Label
+            {
+                Text = "03:00",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            _leftClockLabel.AddThemeFontSizeOverride("font_size", 28);
+
+            leftBox.AddChild(_leftPlayerTitleLabel);
+            leftBox.AddChild(_leftPlayerRatingLabel);
+            leftBox.AddChild(_leftClockLabel);
+            _leftPlayerCard.AddChild(leftBox);
+            profilesRow.AddChild(_leftPlayerCard);
+
+            // Tarjeta Derecha: SIEMPRE Oponente (Bot / Rival Online / Jugador 2)
+            _rightPlayerCard = CreateStyledPanel(CardBgColor, PlayerOColor, borderWidth: 3, cornerRadius: 14, contentMargin: 12);
+            _rightPlayerCard.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+            var rightBox = new VBoxContainer();
+            rightBox.AddThemeConstantOverride("separation", 4);
+
+            _rightPlayerTitleLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
+            _rightPlayerTitleLabel.AddThemeFontSizeOverride("font_size", 22);
+
+            _rightPlayerRatingLabel = new Label { HorizontalAlignment = HorizontalAlignment.Center };
+            _rightPlayerRatingLabel.AddThemeFontSizeOverride("font_size", 19);
+
+            _rightClockLabel = new Label
+            {
+                Text = "03:00",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            _rightClockLabel.AddThemeFontSizeOverride("font_size", 28);
+
+            rightBox.AddChild(_rightPlayerTitleLabel);
+            rightBox.AddChild(_rightPlayerRatingLabel);
+            rightBox.AddChild(_rightClockLabel);
+            _rightPlayerCard.AddChild(rightBox);
+            profilesRow.AddChild(_rightPlayerCard);
         }
 
         private void BuildOnlineConnectionPanel(VBoxContainer parent)
@@ -184,11 +254,11 @@ namespace FractalTicTacToe.GodotClient
                 new Color(0.24f, 0.64f, 0.96f),
                 borderWidth: 2,
                 cornerRadius: 12,
-                contentMargin: 12);
+                contentMargin: 10);
             _onlineConnectPanel.Visible = false;
 
             var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-            row.AddThemeConstantOverride("separation", 12);
+            row.AddThemeConstantOverride("separation", 10);
 
             _usernameInput = new LineEdit
             {
@@ -196,7 +266,7 @@ namespace FractalTicTacToe.GodotClient
                 Text = $"Jugador_{new Random().Next(100, 999)}",
                 SizeFlagsHorizontal = SizeFlags.ExpandFill
             };
-            _usernameInput.AddThemeFontSizeOverride("font_size", 22);
+            _usernameInput.AddThemeFontSizeOverride("font_size", 20);
 
             _serverEndpointInput = new LineEdit
             {
@@ -204,9 +274,9 @@ namespace FractalTicTacToe.GodotClient
                 Text = "127.0.0.1:7777",
                 SizeFlagsHorizontal = SizeFlags.ExpandFill
             };
-            _serverEndpointInput.AddThemeFontSizeOverride("font_size", 22);
+            _serverEndpointInput.AddThemeFontSizeOverride("font_size", 20);
 
-            _connectQueueButton = CreateActionButton("🌐 Buscar Rival", OnConnectAndQueuePressed, minHeight: 62);
+            _connectQueueButton = CreateActionButton("🌐 Buscar Rival", OnConnectAndQueuePressed, minHeight: 58);
 
             row.AddChild(_usernameInput);
             row.AddChild(_serverEndpointInput);
@@ -234,15 +304,15 @@ namespace FractalTicTacToe.GodotClient
                 HorizontalAlignment = HorizontalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
-            _takebackOfferLabel.AddThemeFontSizeOverride("font_size", 24);
+            _takebackOfferLabel.AddThemeFontSizeOverride("font_size", 22);
             _takebackOfferLabel.AddThemeColorOverride("font_color", LastMoveHighlightColor);
             col.AddChild(_takebackOfferLabel);
 
             var btnRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-            btnRow.AddThemeConstantOverride("separation", 16);
+            btnRow.AddThemeConstantOverride("separation", 14);
 
-            var acceptBtn = CreateActionButton("✓ Aceptar Deshacer", () => _onlineClient.RespondToOpponentTakeback(true), minHeight: 64);
-            var declineBtn = CreateActionButton("✕ Rechazar", () => _onlineClient.RespondToOpponentTakeback(false), minHeight: 64);
+            var acceptBtn = CreateActionButton("✓ Aceptar Deshacer", () => _onlineClient.RespondToOpponentTakeback(true), minHeight: 60);
+            var declineBtn = CreateActionButton("✕ Rechazar", () => _onlineClient.RespondToOpponentTakeback(false), minHeight: 60);
 
             btnRow.AddChild(acceptBtn);
             btnRow.AddChild(declineBtn);
@@ -254,12 +324,12 @@ namespace FractalTicTacToe.GodotClient
 
         private void BuildStatusBanner(VBoxContainer parent)
         {
-            var bannerPanel = CreateStyledPanel(
+            _statusBannerPanel = CreateStyledPanel(
                 new Color(0.13f, 0.17f, 0.25f),
                 new Color(0.30f, 0.38f, 0.52f),
                 borderWidth: 2,
                 cornerRadius: 14,
-                contentMargin: 14);
+                contentMargin: 12);
 
             _statusBannerLabel = new Label
             {
@@ -267,9 +337,9 @@ namespace FractalTicTacToe.GodotClient
                 VerticalAlignment = VerticalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
-            _statusBannerLabel.AddThemeFontSizeOverride("font_size", 26);
-            bannerPanel.AddChild(_statusBannerLabel);
-            parent.AddChild(bannerPanel);
+            _statusBannerLabel.AddThemeFontSizeOverride("font_size", 24);
+            _statusBannerPanel.AddChild(_statusBannerLabel);
+            parent.AddChild(_statusBannerPanel);
         }
 
         private void BuildFractalBoardGrid(VBoxContainer parent)
@@ -288,8 +358,8 @@ namespace FractalTicTacToe.GodotClient
                 SizeFlagsHorizontal = SizeFlags.ExpandFill,
                 SizeFlagsVertical = SizeFlags.ExpandFill
             };
-            macroGrid.AddThemeConstantOverride("h_separation", 16);
-            macroGrid.AddThemeConstantOverride("v_separation", 16);
+            macroGrid.AddThemeConstantOverride("h_separation", 14);
+            macroGrid.AddThemeConstantOverride("v_separation", 14);
             aspectContainer.AddChild(macroGrid);
 
             for (int boardIdx = 0; boardIdx < GameState.BoardCount; boardIdx++)
@@ -342,26 +412,28 @@ namespace FractalTicTacToe.GodotClient
             {
                 SizeFlagsHorizontal = SizeFlags.ExpandFill
             };
-            topControlsRow.AddThemeConstantOverride("separation", 14);
+            topControlsRow.AddThemeConstantOverride("separation", 12);
             parent.AddChild(topControlsRow);
 
-            _undoButton = CreateActionButton("⟲ Deshacer", OnUndoPressed);
-            _redoButton = CreateActionButton("⟳ Rehacer", OnRedoPressed);
-            _hintButton = CreateActionButton("💡 Pista IA", OnHintPressed);
+            _undoButton = CreateActionButton("⟲ Deshacer", OnUndoPressed, minHeight: 64);
+            _redoButton = CreateActionButton("⟳ Rehacer", OnRedoPressed, minHeight: 64);
+            _hintButton = CreateActionButton("💡 Pista IA", OnHintPressed, minHeight: 64);
+            _timeControlButton = CreateActionButton($"⏱ {TimeControls[_timeControlIndex].Name}", OnCycleTimeControlPressed, minHeight: 64);
 
             topControlsRow.AddChild(_undoButton);
             topControlsRow.AddChild(_redoButton);
             topControlsRow.AddChild(_hintButton);
+            topControlsRow.AddChild(_timeControlButton);
 
             var bottomControlsRow = new HBoxContainer
             {
                 SizeFlagsHorizontal = SizeFlags.ExpandFill
             };
-            bottomControlsRow.AddThemeConstantOverride("separation", 14);
+            bottomControlsRow.AddThemeConstantOverride("separation", 12);
             parent.AddChild(bottomControlsRow);
 
-            _modeButton = CreateActionButton("Modo: Vs Bot (Difícil)", OnCycleModePressed);
-            _newGameOrResignButton = CreateActionButton("★ Nueva Partida", OnNewMatchOrResignPressed);
+            _modeButton = CreateActionButton("Modo: Vs Bot (Difícil)", OnCycleModePressed, minHeight: 68);
+            _newGameOrResignButton = CreateActionButton("★ Nueva Partida", OnNewMatchOrResignPressed, minHeight: 68);
 
             bottomControlsRow.AddChild(_modeButton);
             bottomControlsRow.AddChild(_newGameOrResignButton);
@@ -417,9 +489,8 @@ namespace FractalTicTacToe.GodotClient
             }
         }
 
-        private void OnOnlineAuthenticated(string username, int elo, string rank)
+        private void OnOnlineAuthenticated(string username, int rating, string rank)
         {
-            // Una vez autenticado, entra automáticamente a la cola de Matchmaking por ELO
             _onlineClient.JoinMatchmakingQueue();
         }
 
@@ -473,15 +544,33 @@ namespace FractalTicTacToe.GodotClient
             RefreshUI();
         }
 
+        private void OnCycleTimeControlPressed()
+        {
+            _timeControlIndex = (_timeControlIndex + 1) % TimeControls.Length;
+            TimeControlConfig cfg = TimeControls[_timeControlIndex];
+            _timeControlButton.Text = $"⏱ {cfg.Name}";
+
+            if (_isOnlineMode)
+            {
+                _onlineClient.Clock.Reset(cfg);
+            }
+            else
+            {
+                _localSession.SetTimeControl(cfg);
+            }
+        }
+
         private void OnCycleModePressed()
         {
             _currentHintMove = null;
+            _lastAnimatedMove = null;
+            _victoryLineAnimated = false;
             _presetIndex = (_presetIndex + 1) % 6;
 
             if (_presetIndex == 5)
             {
                 _isOnlineMode = true;
-                _modeButton.Text = "Modo: 🌐 Online (ELO)";
+                _modeButton.Text = "Modo: 🌐 Online";
                 RefreshUI();
                 return;
             }
@@ -520,6 +609,8 @@ namespace FractalTicTacToe.GodotClient
         private void OnNewMatchOrResignPressed()
         {
             _currentHintMove = null;
+            _lastAnimatedMove = null;
+            _victoryLineAnimated = false;
 
             if (_isOnlineMode)
             {
@@ -559,6 +650,8 @@ namespace FractalTicTacToe.GodotClient
             {
                 RefreshLocalUI();
             }
+
+            UpdateClockLabelsAndPulseGlow();
         }
 
         private void RefreshOnlineUI()
@@ -566,28 +659,39 @@ namespace FractalTicTacToe.GodotClient
             GameState state = _onlineClient.State;
             Move? lastMove = _onlineClient.LastNetworkMove ?? state.GetLastMove();
 
-            string localTag = _onlineClient.AssignedRole != Player.None
-                ? $"{_onlineClient.LocalUsername} (Tú - {_onlineClient.AssignedRole})"
-                : (_onlineClient.LocalUsername ?? "Sin conectar");
+            // Determinar el rol del jugador local (por defecto X mientras aún no inicia la partida)
+            Player myRole = _onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X;
+            Player oppRole = myRole == Player.X ? Player.O : Player.X;
 
-            string oppTag = !string.IsNullOrEmpty(_onlineClient.OpponentUsername)
-                ? _onlineClient.OpponentUsername
-                : "Esperando rival...";
+            Color myColor = myRole == Player.X ? PlayerXColor : PlayerOColor;
+            Color oppColor = oppRole == Player.X ? PlayerXColor : PlayerOColor;
 
-            if (_onlineClient.AssignedRole == Player.O)
+            SetPanelBorderColor(_leftPlayerCard, myColor);
+            SetPanelBorderColor(_rightPlayerCard, oppColor);
+
+            string myName = !string.IsNullOrEmpty(_onlineClient.LocalUsername) ? _onlineClient.LocalUsername : "Tú";
+            string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Esperando rival...";
+
+            // Calcular deltas de Rating estilo Lichess si la partida acaba de terminar
+            int? myDelta = null;
+            int? oppDelta = null;
+            if (state.IsGameOver && _onlineClient.LastRatingUpdate.HasValue)
             {
-                _playerXTitleLabel.Text = $"[X] {oppTag}";
-                _playerXEloLabel.Text = $"{_onlineClient.OpponentElo} ELO";
-                _playerOTitleLabel.Text = $"[O] {localTag}";
-                _playerOEloLabel.Text = $"{_onlineClient.LocalElo} ELO • {_onlineClient.LocalRankTitle}";
+                EloMatchUpdate upd = _onlineClient.LastRatingUpdate.Value;
+                myDelta = myRole == Player.X ? upd.DeltaX : upd.DeltaO;
+                oppDelta = oppRole == Player.X ? upd.DeltaX : upd.DeltaO;
             }
-            else
-            {
-                _playerXTitleLabel.Text = $"[X] {localTag}";
-                _playerXEloLabel.Text = $"{_onlineClient.LocalElo} ELO • {_onlineClient.LocalRankTitle}";
-                _playerOTitleLabel.Text = $"[O] {oppTag}";
-                _playerOEloLabel.Text = $"{_onlineClient.OpponentElo} ELO";
-            }
+
+            // Tarjeta Izquierda = SIEMPRE el Jugador Local ("Tú") con su símbolo [X] u [O]
+            _leftPlayerTitleLabel.Text = $"[{myRole}] {myName} (Tú)";
+            _leftPlayerTitleLabel.AddThemeColorOverride("font_color", myColor);
+            ConfigureRatingLabelWithDelta(_leftPlayerRatingLabel, _onlineClient.LocalElo, _onlineClient.LocalRankTitle, myDelta);
+
+            // Tarjeta Derecha = SIEMPRE el Oponente con su símbolo [O] o [X]
+            _rightPlayerTitleLabel.Text = $"[{oppRole}] {oppName}";
+            _rightPlayerTitleLabel.AddThemeColorOverride("font_color", oppColor);
+            string oppRank = EloRatingCalculator.GetRankTitle(_onlineClient.OpponentElo);
+            ConfigureRatingLabelWithDelta(_rightPlayerRatingLabel, _onlineClient.OpponentElo, oppRank, oppDelta);
 
             if (!_onlineClient.IsConnected)
             {
@@ -595,13 +699,23 @@ namespace FractalTicTacToe.GodotClient
             }
             else if (_onlineClient.IsInQueue)
             {
-                _statusBannerLabel.Text = $"Buscando oponente compatible con {_onlineClient.LocalElo} ELO...";
+                _statusBannerLabel.Text = $"Buscando oponente compatible con {_onlineClient.LocalElo} pts...";
             }
             else if (state.IsGameOver)
             {
-                _statusBannerLabel.Text = state.Winner != Player.None
-                    ? $"¡FIN DE PARTIDA ONLINE! GANADOR: JUGADOR {state.Winner}"
-                    : "¡EMPATE GLOBAL ONLINE!";
+                string reasonText = FormatEndReason(_onlineClient.LastEndReason);
+                if (state.Winner == myRole)
+                {
+                    _statusBannerLabel.Text = $"¡VICTORIA ({reasonText})! Ganaste con [{myRole}]";
+                }
+                else if (state.Winner == oppRole)
+                {
+                    _statusBannerLabel.Text = $"DERROTA ({reasonText}) • Ganó {oppName} [{oppRole}]";
+                }
+                else
+                {
+                    _statusBannerLabel.Text = "¡EMPATE GLOBAL ONLINE!";
+                }
             }
             else if (_onlineClient.IsWaitingForOpponentTakebackResponse)
             {
@@ -609,8 +723,8 @@ namespace FractalTicTacToe.GodotClient
             }
             else
             {
-                bool isMyTurn = state.CurrentPlayer == _onlineClient.AssignedRole;
-                string turnText = isMyTurn ? "¡ES TU TURNO!" : $"Turno de tu rival ({state.CurrentPlayer})";
+                bool isMyTurn = state.CurrentPlayer == myRole;
+                string turnText = isMyTurn ? $"¡TU TURNO [{myRole}]!" : $"Turno de {oppName} [{oppRole}]";
                 string boardText = state.ActiveBoardIndex == GameState.FreeMoveBoardIndex
                     ? "TIRO LIBRE"
                     : $"TABLERO FORZADO #{state.ActiveBoardIndex}";
@@ -620,15 +734,15 @@ namespace FractalTicTacToe.GodotClient
             if (_onlineClient.HasIncomingTakebackOffer)
             {
                 _takebackOfferLabel.Text =
-                    $"⚠ El Jugador {_onlineClient.IncomingTakebackRequester} pide permiso para deshacer " +
+                    $"⚠ {oppName} [{_onlineClient.IncomingTakebackRequester}] pide permiso para deshacer " +
                     $"{_onlineClient.IncomingTakebackPlies} medio(s) turno(s). ¿Aceptas?";
             }
 
             bool allowTap = _onlineClient.IsInActiveMatch &&
-                            state.CurrentPlayer == _onlineClient.AssignedRole &&
+                            state.CurrentPlayer == myRole &&
                             !_onlineClient.IsWaitingForOpponentTakebackResponse;
 
-            RenderBoardCells(state, lastMove, allowTap);
+            RenderBoardCellsAndAnimate(state, lastMove, allowTap);
 
             _undoButton.Text = "⟲ Pedir Deshacer";
             _undoButton.Disabled = !_onlineClient.IsInActiveMatch ||
@@ -645,20 +759,43 @@ namespace FractalTicTacToe.GodotClient
             GameState state = _localSession.State;
             Move? lastMove = state.GetLastMove();
 
-            _playerXTitleLabel.Text = $"[X] {_localSession.ProfileX.Username}";
-            _playerXEloLabel.Text = $"{_localSession.ProfileX.EloRating} ELO • {_localSession.ProfileX.RankTitle} ({_localSession.ProfileX.Wins}V/{_localSession.ProfileX.Losses}D)";
+            // En modo local: determinamos quién es el jugador humano local (Izquierda) y quién es el rival (Derecha)
+            bool humanIsO = _localSession.Mode == SessionMode.BotVsHumanO;
+            Player myRole = humanIsO ? Player.O : Player.X;
+            Player oppRole = humanIsO ? Player.X : Player.O;
 
-            _playerOTitleLabel.Text = $"[O] {_localSession.ProfileO.Username}";
-            _playerOEloLabel.Text = $"{_localSession.ProfileO.EloRating} ELO • {_localSession.ProfileO.RankTitle} ({_localSession.ProfileO.Wins}V/{_localSession.ProfileO.Losses}D)";
+            PlayerProfile myProfile = myRole == Player.X ? _localSession.ProfileX : _localSession.ProfileO;
+            PlayerProfile oppProfile = oppRole == Player.X ? _localSession.ProfileX : _localSession.ProfileO;
+
+            Color myColor = myRole == Player.X ? PlayerXColor : PlayerOColor;
+            Color oppColor = oppRole == Player.X ? PlayerXColor : PlayerOColor;
+
+            SetPanelBorderColor(_leftPlayerCard, myColor);
+            SetPanelBorderColor(_rightPlayerCard, oppColor);
+
+            int? myDelta = null;
+            int? oppDelta = null;
+            if (state.IsGameOver && _localSession.LastEloUpdate.HasValue)
+            {
+                EloMatchUpdate upd = _localSession.LastEloUpdate.Value;
+                myDelta = myRole == Player.X ? upd.DeltaX : upd.DeltaO;
+                oppDelta = oppRole == Player.X ? upd.DeltaX : upd.DeltaO;
+            }
+
+            _leftPlayerTitleLabel.Text = $"[{myRole}] {myProfile.Username} (Tú)";
+            _leftPlayerTitleLabel.AddThemeColorOverride("font_color", myColor);
+            ConfigureRatingLabelWithDelta(_leftPlayerRatingLabel, myProfile.EloRating, myProfile.RankTitle, myDelta);
+
+            _rightPlayerTitleLabel.Text = $"[{oppRole}] {oppProfile.Username}";
+            _rightPlayerTitleLabel.AddThemeColorOverride("font_color", oppColor);
+            ConfigureRatingLabelWithDelta(_rightPlayerRatingLabel, oppProfile.EloRating, oppProfile.RankTitle, oppDelta);
 
             if (state.IsGameOver)
             {
+                string reasonText = FormatEndReason(_localSession.LastEndReason);
                 if (state.Winner != Player.None)
                 {
-                    string deltaInfo = _localSession.LastEloUpdate.HasValue
-                        ? $"  |  ELO: X ({FormatDelta(_localSession.LastEloUpdate.Value.DeltaX)}), O ({FormatDelta(_localSession.LastEloUpdate.Value.DeltaO)})"
-                        : string.Empty;
-                    _statusBannerLabel.Text = $"¡VICTORIA POR MUERTE SÚBITA! GANADOR: JUGADOR {state.Winner}{deltaInfo}";
+                    _statusBannerLabel.Text = $"¡FIN DE PARTIDA ({reasonText})! GANADOR: JUGADOR {state.Winner}";
                 }
                 else
                 {
@@ -667,22 +804,22 @@ namespace FractalTicTacToe.GodotClient
             }
             else if (_localSession.IsBotThinking)
             {
-                _statusBannerLabel.Text = $"Bot Minimax ({state.CurrentPlayer}) calculando jugada óptima...";
+                _statusBannerLabel.Text = $"Bot Minimax [{state.CurrentPlayer}] calculando jugada óptima...";
             }
             else if (state.ActiveBoardIndex == GameState.FreeMoveBoardIndex)
             {
-                _statusBannerLabel.Text = $"Turno de {state.CurrentPlayer} • TIRO LIBRE (Elige cualquier tablero en verde)";
+                _statusBannerLabel.Text = $"Turno de [{state.CurrentPlayer}] • TIRO LIBRE (Elige cualquier tablero en verde)";
             }
             else
             {
-                _statusBannerLabel.Text = $"Turno de {state.CurrentPlayer} • TABLERO FORZADO #{state.ActiveBoardIndex}";
+                _statusBannerLabel.Text = $"Turno de [{state.CurrentPlayer}] • TABLERO FORZADO #{state.ActiveBoardIndex}";
             }
 
             if (_localSession.LastBotSearchResult.HasValue)
             {
                 MinimaxSearchResult r = _localSession.LastBotSearchResult.Value;
                 _telemetryLabel.Text =
-                    $"Último cálculo IA: {r.BestMove} | Eval: {r.Score} | Prof: {r.MaxDepthReached} | " +
+                    $"IA: {r.BestMove} | Eval: {r.Score} | Prof: {r.MaxDepthReached} | " +
                     $"Nodos: {r.NodesEvaluated:N0} | TT Hits: {r.TranspositionHits:N0} | {r.ElapsedMs} ms";
             }
             else if (!_currentHintMove.HasValue)
@@ -691,7 +828,7 @@ namespace FractalTicTacToe.GodotClient
             }
 
             bool allowTap = !state.IsGameOver && !_localSession.IsBotThinking && !_localSession.IsCurrentTurnBot();
-            RenderBoardCells(state, lastMove, allowTap);
+            RenderBoardCellsAndAnimate(state, lastMove, allowTap);
 
             _undoButton.Text = "⟲ Deshacer";
             _undoButton.Disabled = _localSession.IsBotThinking || !state.CanUndo;
@@ -700,8 +837,82 @@ namespace FractalTicTacToe.GodotClient
             _newGameOrResignButton.Text = "★ Nueva Partida";
         }
 
-        private void RenderBoardCells(GameState state, Move? lastMove, bool allowHumanInput)
+        private static void ConfigureRatingLabelWithDelta(Label label, int rating, string rankTitle, int? delta)
         {
+            if (delta.HasValue)
+            {
+                string sign = delta.Value >= 0 ? "+" : "";
+                label.Text = $"{rating} pts ({sign}{delta.Value}) • {rankTitle}";
+                label.AddThemeColorOverride("font_color", delta.Value >= 0 ? PositiveDeltaColor : NegativeDeltaColor);
+            }
+            else
+            {
+                label.Text = $"{rating} pts • {rankTitle}";
+                label.AddThemeColorOverride("font_color", new Color(0.82f, 0.86f, 0.94f));
+            }
+        }
+
+        private void UpdateClockLabelsAndPulseGlow()
+        {
+            GameState state = _isOnlineMode ? _onlineClient.State : _localSession.State;
+            MatchClock clock = _isOnlineMode ? _onlineClient.Clock : _localSession.Clock;
+
+            Player myRole = _isOnlineMode
+                ? (_onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X)
+                : (_localSession.Mode == SessionMode.BotVsHumanO ? Player.O : Player.X);
+            Player oppRole = myRole == Player.X ? Player.O : Player.X;
+
+            double mySeconds = clock.GetRemainingSeconds(myRole);
+            double oppSeconds = clock.GetRemainingSeconds(oppRole);
+
+            _leftClockLabel.Text = $"⏱ {MatchClock.FormatClock(mySeconds)}";
+            _rightClockLabel.Text = $"⏱ {MatchClock.FormatClock(oppSeconds)}";
+
+            bool myClockActive = !state.IsGameOver && state.CurrentPlayer == myRole;
+            bool oppClockActive = !state.IsGameOver && state.CurrentPlayer == oppRole;
+
+            StyleClockLabel(_leftClockLabel, mySeconds, myClockActive);
+            StyleClockLabel(_rightClockLabel, oppSeconds, oppClockActive);
+
+            // Efecto visual de respiración (Breathing Glow) sobre los bordes de los tableros macro activos
+            if (!state.IsGameOver)
+            {
+                float wave = 0.5f + 0.5f * Mathf.Sin((float)_pulseTime * 5.5f);
+                Color glowingBorder = ActiveMacroBorderColor.Lerp(new Color(0.55f, 1.0f, 0.78f), wave * 0.65f);
+
+                for (int board = 0; board < GameState.BoardCount; board++)
+                {
+                    bool isBoardActive = state.ActiveBoardIndex == GameState.FreeMoveBoardIndex ||
+                                         state.ActiveBoardIndex == board;
+                    if (isBoardActive && _macroBoardPanels[board] != null)
+                    {
+                        var macroStyle = (StyleBoxFlat)_macroBoardPanels[board].GetThemeStylebox("panel");
+                        macroStyle.BorderColor = glowingBorder;
+                    }
+                }
+            }
+        }
+
+        private static void StyleClockLabel(Label label, double seconds, bool isActiveTurn)
+        {
+            if (seconds < 20.0 && isActiveTurn)
+            {
+                label.AddThemeColorOverride("font_color", NegativeDeltaColor);
+            }
+            else if (isActiveTurn)
+            {
+                label.AddThemeColorOverride("font_color", ActiveMacroBorderColor);
+            }
+            else
+            {
+                label.AddThemeColorOverride("font_color", new Color(0.50f, 0.56f, 0.66f));
+            }
+        }
+
+        private void RenderBoardCellsAndAnimate(GameState state, Move? lastMove, bool allowHumanInput)
+        {
+            bool hasWinningLine = state.TryGetWinningLine(out int winBoard, out int winC0, out int winC1, out int winC2);
+
             for (int board = 0; board < GameState.BoardCount; board++)
             {
                 bool isBoardActive = !state.IsGameOver &&
@@ -709,10 +920,18 @@ namespace FractalTicTacToe.GodotClient
                                       state.ActiveBoardIndex == board);
 
                 var macroStyle = (StyleBoxFlat)_macroBoardPanels[board].GetThemeStylebox("panel");
-                macroStyle.BorderColor = isBoardActive ? ActiveMacroBorderColor : InactiveMacroBorderColor;
-                macroStyle.BgColor = isBoardActive
-                    ? new Color(0.13f, 0.18f, 0.24f)
-                    : new Color(0.08f, 0.10f, 0.15f);
+                if (hasWinningLine && board == winBoard)
+                {
+                    macroStyle.BorderColor = WinningCellHighlightColor;
+                    macroStyle.BgColor = new Color(0.10f, 0.24f, 0.18f);
+                }
+                else
+                {
+                    macroStyle.BorderColor = isBoardActive ? ActiveMacroBorderColor : InactiveMacroBorderColor;
+                    macroStyle.BgColor = isBoardActive
+                        ? new Color(0.13f, 0.18f, 0.24f)
+                        : new Color(0.08f, 0.10f, 0.15f);
+                }
 
                 for (int cell = 0; cell < GameState.CellsPerBoard; cell++)
                 {
@@ -723,13 +942,64 @@ namespace FractalTicTacToe.GodotClient
                                       lastMove.Value.BoardIndex == board &&
                                       lastMove.Value.CellIndex == cell;
 
+                    bool isWinningCell = hasWinningLine &&
+                                         board == winBoard &&
+                                         (cell == winC0 || cell == winC1 || cell == winC2);
+
                     bool isHintMove = _currentHintMove.HasValue &&
                                       _currentHintMove.Value.BoardIndex == board &&
                                       _currentHintMove.Value.CellIndex == cell;
 
-                    StyleCellButton(btn, occupant, isBoardActive && allowHumanInput, isLastMove, isHintMove);
+                    StyleCellButton(btn, occupant, isBoardActive && allowHumanInput, isLastMove, isWinningCell, isHintMove);
                 }
             }
+
+            // Animación Tween "Pop" elástica cuando se coloca una nueva ficha
+            if (lastMove.HasValue && (!_lastAnimatedMove.HasValue || !_lastAnimatedMove.Value.Equals(lastMove.Value)))
+            {
+                _lastAnimatedMove = lastMove.Value;
+                AnimateButtonPop(_cellButtons[lastMove.Value.BoardIndex, lastMove.Value.CellIndex]);
+            }
+
+            // Animación de celebración sobre las 3 celdas ganadoras y el banner al ocurrir Muerte Súbita
+            if (hasWinningLine && !_victoryLineAnimated)
+            {
+                _victoryLineAnimated = true;
+                AnimateButtonPop(_cellButtons[winBoard, winC0], 0.38f);
+                AnimateButtonPop(_cellButtons[winBoard, winC1], 0.44f);
+                AnimateButtonPop(_cellButtons[winBoard, winC2], 0.50f);
+                AnimateControlPulse(_statusBannerPanel);
+            }
+            else if (!state.IsGameOver)
+            {
+                _victoryLineAnimated = false;
+            }
+        }
+
+        private void AnimateButtonPop(Button btn, float duration = 0.26f)
+        {
+            if (btn == null) return;
+
+            btn.PivotOffset = btn.Size * 0.5f;
+            btn.Scale = new Vector2(0.25f, 0.25f);
+
+            Tween tween = CreateTween();
+            tween.SetTrans(Tween.TransitionType.Back);
+            tween.SetEase(Tween.EaseType.Out);
+            tween.TweenProperty(btn, "scale", Vector2.One, duration);
+        }
+
+        private void AnimateControlPulse(Control control)
+        {
+            if (control == null) return;
+
+            control.PivotOffset = control.Size * 0.5f;
+            control.Scale = new Vector2(0.92f, 0.92f);
+
+            Tween tween = CreateTween();
+            tween.SetTrans(Tween.TransitionType.Elastic);
+            tween.SetEase(Tween.EaseType.Out);
+            tween.TweenProperty(control, "scale", Vector2.One, 0.45f);
         }
 
         private static void StyleCellButton(
@@ -737,6 +1007,7 @@ namespace FractalTicTacToe.GodotClient
             Player occupant,
             bool isCellInteractive,
             bool isLastMove,
+            bool isWinningCell,
             bool isHintMove)
         {
             var style = new StyleBoxFlat
@@ -752,14 +1023,18 @@ namespace FractalTicTacToe.GodotClient
                 btn.Text = "X";
                 btn.Disabled = true;
                 btn.AddThemeColorOverride("font_disabled_color", PlayerXColor);
-                style.BgColor = new Color(0.22f, 0.12f, 0.16f);
+                style.BgColor = isWinningCell
+                    ? new Color(0.32f, 0.16f, 0.20f)
+                    : new Color(0.22f, 0.12f, 0.16f);
             }
             else if (occupant == Player.O)
             {
                 btn.Text = "O";
                 btn.Disabled = true;
                 btn.AddThemeColorOverride("font_disabled_color", PlayerOColor);
-                style.BgColor = new Color(0.10f, 0.18f, 0.28f);
+                style.BgColor = isWinningCell
+                    ? new Color(0.14f, 0.28f, 0.36f)
+                    : new Color(0.10f, 0.18f, 0.28f);
             }
             else
             {
@@ -770,7 +1045,15 @@ namespace FractalTicTacToe.GodotClient
                     : new Color(0.11f, 0.13f, 0.18f);
             }
 
-            if (isLastMove)
+            if (isWinningCell)
+            {
+                style.BorderWidthLeft = 5;
+                style.BorderWidthRight = 5;
+                style.BorderWidthTop = 5;
+                style.BorderWidthBottom = 5;
+                style.BorderColor = WinningCellHighlightColor;
+            }
+            else if (isLastMove)
             {
                 style.BorderWidthLeft = 4;
                 style.BorderWidthRight = 4;
@@ -791,6 +1074,14 @@ namespace FractalTicTacToe.GodotClient
             btn.AddThemeStyleboxOverride("hover", style);
             btn.AddThemeStyleboxOverride("pressed", style);
             btn.AddThemeStyleboxOverride("disabled", style);
+        }
+
+        private static void SetPanelBorderColor(PanelContainer panel, Color borderColor)
+        {
+            if (panel?.GetThemeStylebox("panel") is StyleBoxFlat style)
+            {
+                style.BorderColor = borderColor;
+            }
         }
 
         private static PanelContainer CreateStyledPanel(
@@ -822,7 +1113,7 @@ namespace FractalTicTacToe.GodotClient
             return panel;
         }
 
-        private static Button CreateActionButton(string text, Action onPressed, float minHeight = 72f)
+        private static Button CreateActionButton(string text, Action onPressed, float minHeight = 70f)
         {
             var btn = new Button
             {
@@ -831,11 +1122,22 @@ namespace FractalTicTacToe.GodotClient
                 SizeFlagsHorizontal = SizeFlags.ExpandFill,
                 FocusMode = FocusModeEnum.None
             };
-            btn.AddThemeFontSizeOverride("font_size", 22);
+            btn.AddThemeFontSizeOverride("font_size", 21);
             btn.Pressed += onPressed;
             return btn;
         }
 
-        private static string FormatDelta(int delta) => delta >= 0 ? $"+{delta}" : delta.ToString();
+        private static string FormatEndReason(MatchEndReason reason)
+        {
+            switch (reason)
+            {
+                case MatchEndReason.SuddenDeathThreeInARow: return "Muerte Súbita";
+                case MatchEndReason.Timeout: return "Tiempo Agotado";
+                case MatchEndReason.Resignation: return "Rendición";
+                case MatchEndReason.DisconnectForfeit: return "Abandono";
+                case MatchEndReason.GlobalDraw: return "Empate";
+                default: return "Finalizada";
+            }
+        }
     }
 }

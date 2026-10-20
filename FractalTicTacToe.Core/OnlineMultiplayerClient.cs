@@ -36,7 +36,10 @@ namespace FractalTicTacToe.Core
         public int OpponentElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
 
         public GameState State { get; private set; } = new GameState();
+        public MatchClock Clock { get; } = new MatchClock(TimeControlConfig.Blitz3Plus2);
         public Move? LastNetworkMove { get; private set; }
+        public EloMatchUpdate? LastRatingUpdate { get; private set; }
+        public MatchEndReason LastEndReason { get; private set; } = MatchEndReason.InProgress;
 
         /// <summary>
         /// Indica si el oponente ha solicitado deshacer su jugada y está esperando nuestra respuesta (Aceptar/Rechazar).
@@ -172,6 +175,26 @@ namespace FractalTicTacToe.Core
             SendRawLine(MultiplayerProtocol.BuildResign(ActiveRoomId));
         }
 
+        /// <summary>
+        /// Actualiza el reloj en curso durante una partida en línea. Si el tiempo del jugador local llega a 0,
+        /// notifica automáticamente la derrota por tiempo al servidor.
+        /// </summary>
+        public bool TickClock(double deltaSeconds)
+        {
+            if (!IsInActiveMatch)
+            {
+                return false;
+            }
+
+            bool expired = Clock.Tick(deltaSeconds);
+            if (expired && Clock.FlaggedPlayer == AssignedRole)
+            {
+                ResignMatch();
+            }
+
+            return expired;
+        }
+
         public void RequestLeaderboard()
         {
             if (!IsConnected) return;
@@ -291,6 +314,10 @@ namespace FractalTicTacToe.Core
                         HasIncomingTakebackOffer = false;
                         IsWaitingForOpponentTakebackResponse = false;
                         LastNetworkMove = null;
+                        LastRatingUpdate = null;
+                        LastEndReason = MatchEndReason.InProgress;
+                        Clock.Reset(Clock.Config);
+                        Clock.Start(Player.X);
 
                         ActiveRoomId = parts[1];
                         Enum.TryParse(parts[2], ignoreCase: true, out Player role);
@@ -343,6 +370,8 @@ namespace FractalTicTacToe.Core
                             State = GameSerializer.FromFen(parts[4]);
                         }
 
+                        Player mover = State.CurrentPlayer == Player.X ? Player.O : Player.X;
+                        Clock.OnMoveCompleted(mover, State.CurrentPlayer);
                         StateChanged?.Invoke();
                     }
                     break;
@@ -425,6 +454,9 @@ namespace FractalTicTacToe.Core
 
                         LocalRankTitle = EloRatingCalculator.GetRankTitle(LocalElo);
                         var eloUpdate = new EloMatchUpdate(newEloX, deltaX, newEloO, deltaO);
+                        LastRatingUpdate = eloUpdate;
+                        LastEndReason = reason;
+                        Clock.Pause();
                         MatchEnded?.Invoke(winner, reason, eloUpdate);
                         StateChanged?.Invoke();
                     }

@@ -24,8 +24,9 @@ namespace CoreTests
             TestGameSessionControllerAsyncFlow();
             TestOnlineMatchmakingAndMutualConsentTakeback();
             TestOnlineMultiplayerClientProtocolStateMachine();
+            TestMatchClockFischerIncrementAndWinningLine();
 
-            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO, Sesión Móvil, Multijugador Online (Servidor + Cliente + Takeback) y Minimax pasaron exitosamente!");
+            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, Rating, Reloj Fischer, Sesión Móvil, Multijugador Online y Minimax pasaron exitosamente!");
             return 0;
         }
 
@@ -406,6 +407,35 @@ namespace CoreTests
                 Assert(!clientO.HasIncomingTakebackOffer && !clientX.IsWaitingForOpponentTakebackResponse, "El estado de Takeback pendiente debe limpiarse.");
                 Assert(clientX.State.MoveCount == 0 && clientO.State.MoveCount == 0, "Ambos clientes deben haber revertido la jugada sincronizadamente.");
             }
+        }
+
+        private static void TestMatchClockFischerIncrementAndWinningLine()
+        {
+            // 1. Verificar TryGetWinningLine para la animación de las 3 casillas de Muerte Súbita
+            GameState winGame = GameSerializer.ImportMoveHistory("01-10-02-20-00");
+            Assert(winGame.TryGetWinningLine(out int winBoard, out int c0, out int c1, out int c2), "Debe detectar la línea ganadora.");
+            Assert(winBoard == 0 && c0 == 0 && c1 == 1 && c2 == 2, $"Línea ganadora esperada (Tablero 0: 0,1,2), obtenida ({winBoard}: {c0},{c1},{c2}).");
+
+            // 2. Verificar reloj Blitz 3+2 con incremento Fischer y derrota por tiempo agotado
+            var session = new GameSessionController(
+                SessionMode.PassAndPlay2P,
+                BotDifficulty.Easy,
+                timeControl: TimeControlConfig.Blitz3Plus2);
+
+            session.Clock.Start(Player.X);
+            session.TickClock(10.0); // X consume 10s -> le quedan 170s
+            Assert(Math.Abs(session.Clock.RemainingSecondsX - 170.0) < 0.001, "A X deben quedarle 170s.");
+
+            // X realiza su jugada -> recibe +2s de incremento Fischer (172s) y el reloj cambia a O
+            Assert(session.TryPlayHumanMove(4, 4), "X juega (4,4)");
+            Assert(Math.Abs(session.Clock.RemainingSecondsX - 172.0) < 0.001, "X debe recibir +2s de incremento Fischer (172s).");
+            Assert(session.Clock.ActivePlayer == Player.O, "El reloj activo debe cambiar a O.");
+
+            // O agota sus 180 segundos -> pierde inmediatamente por Timeout y se actualiza el Rating (+20 / -20)
+            Assert(session.TickClock(180.5), "El tick que agota el reloj de O debe retornar true.");
+            Assert(session.State.IsGameOver && session.State.Winner == Player.X, "X debe ganar por tiempo agotado de O.");
+            Assert(session.LastEndReason == MatchEndReason.Timeout, "El motivo de fin de partida debe ser Timeout.");
+            Assert(session.LastEloUpdate.HasValue && session.LastEloUpdate.Value.DeltaX > 0, "Debe calcular el delta de Rating (+pts) tras ganar por tiempo.");
         }
 
         private static void Assert(bool condition, string message)

@@ -17,8 +17,8 @@ namespace FractalTicTacToe.Core
 
     /// <summary>
     /// Controlador de sesión de juego desacoplado de motor gráfico (patrón MVVM / Presenter).
-    /// Orquesta turnos, llamadas asíncronas a <see cref="MinimaxBot"/> para no bloquear el hilo UI (60/120 FPS en móvil),
-    /// historial Undo/Redo, actualización de ELO y registro de partidas (<see cref="MatchRecord"/>).
+    /// Orquesta turnos, reloj de partida (<see cref="MatchClock"/>), llamadas asíncronas a <see cref="MinimaxBot"/>,
+    /// historial Undo/Redo, actualización de Rating y registro de partidas (<see cref="MatchRecord"/>).
     /// </summary>
     public sealed class GameSessionController
     {
@@ -27,6 +27,7 @@ namespace FractalTicTacToe.Core
         private bool _eloCommittedForCurrentMatch;
 
         public GameState State { get; private set; }
+        public MatchClock Clock { get; }
         public SessionMode Mode { get; private set; }
         public BotDifficulty BotDifficulty => _bot.Difficulty;
         public PlayerProfile ProfileX { get; private set; }
@@ -34,6 +35,7 @@ namespace FractalTicTacToe.Core
         public bool IsBotThinking { get; private set; }
         public MinimaxSearchResult? LastBotSearchResult { get; private set; }
         public EloMatchUpdate? LastEloUpdate { get; private set; }
+        public MatchEndReason LastEndReason { get; private set; }
         public IReadOnlyList<MatchRecord> MatchHistory => _matchHistory;
 
         // Eventos para enlazar con Godot 4, consola o cliente móvil
@@ -46,10 +48,22 @@ namespace FractalTicTacToe.Core
         public GameSessionController(
             SessionMode mode = SessionMode.HumanVsBotX,
             BotDifficulty difficulty = BotDifficulty.Hard,
-            PlayerProfile humanProfile = null)
+            PlayerProfile humanProfile = null,
+            TimeControlConfig? timeControl = null)
         {
             State = new GameState();
+            Clock = new MatchClock(timeControl ?? TimeControlConfig.Blitz3Plus2);
+            Clock.TimeExpired += OnClockTimeExpired;
             ConfigureSession(mode, difficulty, humanProfile);
+        }
+
+        /// <summary>
+        /// Cambia el control de tiempo del reloj y reinicia la partida.
+        /// </summary>
+        public void SetTimeControl(TimeControlConfig config)
+        {
+            Clock.Reset(config);
+            StartNewMatch();
         }
 
         /// <summary>
@@ -94,17 +108,32 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Reinicia el tablero para una nueva partida manteniendo los perfiles y el ELO acumulado.
+        /// Reinicia el tablero y el reloj para una nueva partida manteniendo los perfiles y el Rating acumulado.
         /// </summary>
         public void StartNewMatch()
         {
             State.Reset();
+            Clock.Reset(Clock.Config);
             _bot.ClearTranspositionTable();
             _eloCommittedForCurrentMatch = false;
             LastBotSearchResult = null;
             LastEloUpdate = null;
+            LastEndReason = MatchEndReason.InProgress;
             IsBotThinking = false;
             StateChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// Actualiza el reloj activo en tiempo real. Debe llamarse desde <c>_Process(double delta)</c> en Godot 4.
+        /// </summary>
+        public bool TickClock(double deltaSeconds)
+        {
+            if (State.IsGameOver)
+            {
+                return false;
+            }
+
+            return Clock.Tick(deltaSeconds);
         }
 
         /// <summary>
@@ -132,7 +161,6 @@ namespace FractalTicTacToe.Core
 
         /// <summary>
         /// Intenta ejecutar un movimiento originado por un toque/clic del usuario en la interfaz gráfica.
-        /// Ignora la entrada si el Bot está calculando su jugada o si no es turno humano.
         /// </summary>
         public bool TryPlayHumanMove(int boardIndex, int cellIndex)
         {
@@ -146,7 +174,6 @@ namespace FractalTicTacToe.Core
 
         /// <summary>
         /// Calcula y aplica de forma asíncrona (en un hilo de fondo) la jugada del Bot Minimax.
-        /// Ideal para llamarse con <c>await</c> desde Godot 4 (<c>_Process</c> / señales) sin congelar la pantalla táctil.
         /// </summary>
         public async Task<MinimaxSearchResult?> PlayBotTurnAsync()
         {
@@ -169,7 +196,10 @@ namespace FractalTicTacToe.Core
                 LastBotSearchResult = result;
                 BotThinkingCompleted?.Invoke(result);
 
-                ApplyMoveAndNotify(result.BestMove);
+                if (!State.IsGameOver)
+                {
+                    ApplyMoveAndNotify(result.BestMove);
+                }
                 return result;
             }
             catch
@@ -189,9 +219,6 @@ namespace FractalTicTacToe.Core
             return Task.Run(() => _bot.FindBestMove(snapshot));
         }
 
-        /// <summary>
-        /// Deshace el último turno (en modo Humano vs. Bot retrocede 2 medios turnos para devolverle el turno al humano).
-        /// </summary>
         public bool Undo()
         {
             if (IsBotThinking || !State.CanUndo)
@@ -207,13 +234,15 @@ namespace FractalTicTacToe.Core
                 State.UndoMove();
             }
 
+            if (State.MoveCount == 0)
+            {
+                Clock.Reset(Clock.Config);
+            }
+
             StateChanged?.Invoke();
             return true;
         }
 
-        /// <summary>
-        /// Rehace el último turno deshecho.
-        /// </summary>
         public bool Redo()
         {
             if (IsBotThinking || !State.CanRedo)
@@ -241,32 +270,65 @@ namespace FractalTicTacToe.Core
                 return false;
             }
 
+            if (State.IsGameOver)
+            {
+                Clock.Pause();
+            }
+            else
+            {
+                Clock.OnMoveCompleted(mover, State.CurrentPlayer);
+            }
+
             MoveExecuted?.Invoke(move, mover);
 
             if (State.IsGameOver && !_eloCommittedForCurrentMatch)
             {
-                EloMatchUpdate eloUpdate = EloRatingCalculator.CalculateMatchRatingChange(
-                    ProfileX.EloRating,
-                    ProfileX.GamesPlayed,
-                    ProfileO.EloRating,
-                    ProfileO.GamesPlayed,
-                    State.Winner);
-
-                MatchRecord record = MatchRecord.CreateFromGame(
-                    State,
-                    ProfileX,
-                    ProfileO,
-                    updateProfilesIfGameOver: true);
-
-                _matchHistory.Add(record);
-                LastEloUpdate = eloUpdate;
-                _eloCommittedForCurrentMatch = true;
-
-                MatchCompleted?.Invoke(record, eloUpdate);
+                MatchEndReason reason = State.Winner != Player.None
+                    ? MatchEndReason.SuddenDeathThreeInARow
+                    : MatchEndReason.GlobalDraw;
+                CommitMatchRatingAndRecord(reason);
             }
 
             StateChanged?.Invoke();
             return true;
+        }
+
+        private void OnClockTimeExpired(Player timedOutPlayer)
+        {
+            if (State.IsGameOver)
+            {
+                return;
+            }
+
+            if (State.ForfeitByTimeout(timedOutPlayer) && !_eloCommittedForCurrentMatch)
+            {
+                CommitMatchRatingAndRecord(MatchEndReason.Timeout);
+                StateChanged?.Invoke();
+            }
+        }
+
+        private void CommitMatchRatingAndRecord(MatchEndReason reason)
+        {
+            LastEndReason = reason;
+            EloMatchUpdate eloUpdate = EloRatingCalculator.CalculateMatchRatingChange(
+                ProfileX.EloRating,
+                ProfileX.GamesPlayed,
+                ProfileO.EloRating,
+                ProfileO.GamesPlayed,
+                State.Winner);
+
+            MatchRecord record = MatchRecord.CreateFromGame(
+                State,
+                ProfileX,
+                ProfileO,
+                updateProfilesIfGameOver: true);
+            record.EndReason = reason;
+
+            _matchHistory.Add(record);
+            LastEloUpdate = eloUpdate;
+            _eloCommittedForCurrentMatch = true;
+
+            MatchCompleted?.Invoke(record, eloUpdate);
         }
 
         private static int GetBotBaseElo(BotDifficulty difficulty)

@@ -297,6 +297,70 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
+        /// Declara el fin inmediato de la partida por agotamiento de tiempo en el reloj del jugador indicado.
+        /// </summary>
+        public bool ForfeitByTimeout(Player timedOutPlayer)
+        {
+            if (IsGameOver || timedOutPlayer == Player.None)
+            {
+                return false;
+            }
+
+            ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
+            Winner = timedOutPlayer == Player.X ? Player.O : Player.X;
+            IsGameOver = true;
+            ActiveBoardIndex = FreeMoveBoardIndex;
+            ZobristKey ^= ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
+            return true;
+        }
+
+        /// <summary>
+        /// Si la partida terminó por 3 en raya (Muerte Súbita), obtiene el sub-tablero y los 3 índices de celda ganadores
+        /// para resaltarlos y animarlos en la interfaz gráfica.
+        /// </summary>
+        public bool TryGetWinningLine(out int boardIndex, out int cell0, out int cell1, out int cell2)
+        {
+            boardIndex = -1;
+            cell0 = -1;
+            cell1 = -1;
+            cell2 = -1;
+
+            if (!IsGameOver || Winner == Player.None)
+            {
+                return false;
+            }
+
+            for (int b = 0; b < BoardCount; b++)
+            {
+                if (_boardOccupancy[b] < 3)
+                {
+                    continue;
+                }
+
+                int baseOffset = b * CellsPerBoard;
+                for (int i = 0; i < WinPatterns.Length; i += 3)
+                {
+                    int c0 = WinPatterns[i];
+                    int c1 = WinPatterns[i + 1];
+                    int c2 = WinPatterns[i + 2];
+
+                    if (_cells[baseOffset + c0] == Winner &&
+                        _cells[baseOffset + c1] == Winner &&
+                        _cells[baseOffset + c2] == Winner)
+                    {
+                        boardIndex = b;
+                        cell0 = c0;
+                        cell1 = c1;
+                        cell2 = c2;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// Método interno de ultra-baja latencia usado por <see cref="MinimaxBot"/> para revertir un nodo
         /// durante la búsqueda en el árbol sin alterar la pila de Redo.
         /// </summary>
