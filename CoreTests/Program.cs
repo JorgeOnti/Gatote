@@ -23,8 +23,9 @@ namespace CoreTests
             TestIterativeDeepeningTimeLimitAndDifficulties();
             TestGameSessionControllerAsyncFlow();
             TestOnlineMatchmakingAndMutualConsentTakeback();
+            TestOnlineMultiplayerClientProtocolStateMachine();
 
-            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO, Sesión Móvil, Multijugador Online (Takeback) y Minimax pasaron exitosamente!");
+            Console.WriteLine("¡Todas las pruebas de dominio, Undo/Redo, Serialización FEN/PGN, ELO, Sesión Móvil, Multijugador Online (Servidor + Cliente + Takeback) y Minimax pasaron exitosamente!");
             return 0;
         }
 
@@ -356,6 +357,55 @@ namespace CoreTests
             Assert(room.Resign(idO, out _), "O se rinde.");
             Assert(room.IsMatchOver && room.EffectiveWinner == Player.X && room.EndReason == MatchEndReason.Resignation, "X gana por rendición de O.");
             Assert(matchmaking.GetPlayerMatchHistory("Alice").Count == 1, "El historial de Alice debe contener la partida concluida.");
+        }
+
+        private static void TestOnlineMultiplayerClientProtocolStateMachine()
+        {
+            var matchmaking = new MatchmakingService();
+            PlayerProfile alice = matchmaking.GetOrCreateAccount("Alice");
+            PlayerProfile bob = matchmaking.GetOrCreateAccount("Bob");
+
+            matchmaking.EnqueueOrMatchPlayer(alice.PlayerId);
+            OnlineMatchRoom room = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId);
+
+            using (var clientX = new OnlineMultiplayerClient())
+            using (var clientO = new OnlineMultiplayerClient())
+            {
+                clientX.ProcessServerPacket(MultiplayerProtocol.BuildAuthOk(room.PlayerX));
+                clientO.ProcessServerPacket(MultiplayerProtocol.BuildAuthOk(room.PlayerO));
+
+                clientX.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(room, Player.X));
+                clientO.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(room, Player.O));
+
+                Assert(clientX.IsInActiveMatch && clientX.AssignedRole == Player.X, "Cliente X debe estar activo con rol X.");
+                Assert(clientO.IsInActiveMatch && clientO.AssignedRole == Player.O, "Cliente O debe estar activo con rol O.");
+
+                // X realiza el movimiento (4, 4) en el servidor y ambos clientes reciben STATE_SYNC
+                room.SubmitMove(room.PlayerX.PlayerId, new Move(4, 4), out _);
+                string syncPacket = MultiplayerProtocol.BuildStateSync(room, new Move(4, 4));
+                clientX.ProcessServerPacket(syncPacket);
+                clientO.ProcessServerPacket(syncPacket);
+
+                Assert(clientO.State.MoveCount == 1 && clientO.State.ActiveBoardIndex == 4, "Cliente O debe sincronizar el movimiento (4,4).");
+
+                // X solicita Takeback -> ambos reciben TAKEBACK_OFFERED
+                room.RequestTakeback(room.PlayerX.PlayerId, out TakebackRequest tbReq, out _);
+                string offerPacket = MultiplayerProtocol.BuildTakebackOffered(room, tbReq);
+                clientX.ProcessServerPacket(offerPacket);
+                clientO.ProcessServerPacket(offerPacket);
+
+                Assert(clientX.IsWaitingForOpponentTakebackResponse, "Cliente X debe quedar esperando respuesta del rival.");
+                Assert(clientO.HasIncomingTakebackOffer && clientO.IncomingTakebackPlies == 1, "Cliente O debe mostrar el banner de confirmación de Takeback.");
+
+                // O acepta el Takeback -> ambos reciben TAKEBACK_RESOLVED|ACCEPTED
+                room.RespondToTakeback(room.PlayerO.PlayerId, accept: true, out _);
+                string resolvedPacket = MultiplayerProtocol.BuildTakebackResolved(room, accepted: true);
+                clientX.ProcessServerPacket(resolvedPacket);
+                clientO.ProcessServerPacket(resolvedPacket);
+
+                Assert(!clientO.HasIncomingTakebackOffer && !clientX.IsWaitingForOpponentTakebackResponse, "El estado de Takeback pendiente debe limpiarse.");
+                Assert(clientX.State.MoveCount == 0 && clientO.State.MoveCount == 0, "Ambos clientes deben haber revertido la jugada sincronizadamente.");
+            }
         }
 
         private static void Assert(bool condition, string message)
