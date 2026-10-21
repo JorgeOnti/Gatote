@@ -28,7 +28,7 @@ ServerData/
 .godot/
 .mono/
 data_*/
-android/
+FractalTicTacToe.Godot/android/
 *.old
 
 
