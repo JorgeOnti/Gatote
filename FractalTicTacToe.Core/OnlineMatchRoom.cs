@@ -58,14 +58,18 @@ namespace FractalTicTacToe.Core
 
     /// <summary>
     /// Sala de partida en línea con autoridad de servidor (Anti-Cheat).
-    /// Valida turnos por identidad de cuenta, gestiona solicitudes de Takeback con consentimiento mutuo
-    /// (estilo Lichess / Chess.com), rendiciones y actualización oficial de ELO e historial.
+    /// Valida turnos por identidad de cuenta, modo de tiempo, solicitudes de Takeback con consentimiento mutuo,
+    /// cancelación por inactividad en los primeros 30s (Abort), revanchas y ajuste oficial de puntaje.
     /// </summary>
     public sealed class OnlineMatchRoom
     {
+        private bool _rematchRequestedByX;
+        private bool _rematchRequestedByO;
+
         public string RoomId { get; }
         public PlayerProfile PlayerX { get; }
         public PlayerProfile PlayerO { get; }
+        public TimeControlConfig TimeControl { get; }
         public GameState State { get; }
         public TakebackRequest? PendingTakeback { get; private set; }
         public MatchEndReason EndReason { get; private set; }
@@ -81,7 +85,11 @@ namespace FractalTicTacToe.Core
         public event Action<OnlineMatchRoom, TakebackRequest, bool> TakebackResolved;
         public event Action<OnlineMatchRoom, MatchRecord, EloMatchUpdate> MatchConcluded;
 
-        public OnlineMatchRoom(string roomId, PlayerProfile playerX, PlayerProfile playerO)
+        public OnlineMatchRoom(
+            string roomId,
+            PlayerProfile playerX,
+            PlayerProfile playerO,
+            TimeControlConfig? timeControl = null)
         {
             if (playerX == null) throw new ArgumentNullException(nameof(playerX));
             if (playerO == null) throw new ArgumentNullException(nameof(playerO));
@@ -89,6 +97,7 @@ namespace FractalTicTacToe.Core
             RoomId = string.IsNullOrWhiteSpace(roomId) ? Guid.NewGuid().ToString("N") : roomId;
             PlayerX = playerX;
             PlayerO = playerO;
+            TimeControl = timeControl ?? TimeControlConfig.Blitz3Plus2;
             State = new GameState();
             EndReason = MatchEndReason.InProgress;
             EffectiveWinner = Player.None;
@@ -99,7 +108,7 @@ namespace FractalTicTacToe.Core
         /// </summary>
         public Player GetPlayerRole(string playerId)
         {
-            if (string.Equals( playerId, PlayerX.PlayerId, StringComparison.Ordinal))
+            if (string.Equals(playerId, PlayerX.PlayerId, StringComparison.Ordinal))
             {
                 return Player.X;
             }
@@ -140,7 +149,7 @@ namespace FractalTicTacToe.Core
             }
 
             // Si había una solicitud de Takeback pendiente del rival y el jugador en turno decide tirar,
-            // se rechaza implícitamente el Takeback (comportamiento estándar de Lichess/Chess.com).
+            // se rechaza implícitamente el Takeback.
             if (PendingTakeback.HasValue)
             {
                 TakebackRequest implicitlyDeclined = PendingTakeback.Value;
@@ -201,9 +210,6 @@ namespace FractalTicTacToe.Core
                 return false;
             }
 
-            // Regla estilo ajedrez (Lichess):
-            // - Si pide deshacer quien acaba de tirar (actualmente es turno del rival): se deshace 1 medio turno (1 ply).
-            // - Si pide deshacer quien tiene el turno actual: necesita que existan al menos 2 medios turnos para regresar a su propio turno previo (2 plies).
             int pliesToUndo;
             if (State.CurrentPlayer != requesterRole)
             {
@@ -237,7 +243,6 @@ namespace FractalTicTacToe.Core
 
         /// <summary>
         /// Permite al oponente aceptar o rechazar la solicitud pendiente para deshacer jugada (Takeback).
-        /// Solo el oponente (<see cref="TakebackRequest.ResponderPlayerId"/>) está autorizado para aceptar.
         /// </summary>
         public bool RespondToTakeback(string responderPlayerId, bool accept, out string errorMessage)
         {
@@ -251,8 +256,6 @@ namespace FractalTicTacToe.Core
 
             TakebackRequest currentRequest = PendingTakeback.Value;
 
-            // El propio solicitante puede cancelar su solicitud enviando accept = false,
-            // pero SOLO el oponente (ResponderPlayerId) puede aceptarla (accept = true).
             if (accept && !string.Equals(responderPlayerId, currentRequest.ResponderPlayerId, StringComparison.Ordinal))
             {
                 errorMessage = "Solo el oponente puede aceptar la solicitud para deshacer la jugada.";
@@ -282,7 +285,7 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Permite a un jugador rendirse (Resign), otorgando la victoria y los puntos ELO a su oponente.
+        /// Permite a un jugador rendirse (Resign), otorgando la victoria y los puntos a su oponente.
         /// </summary>
         public bool Resign(string playerId, out string errorMessage)
         {
@@ -300,29 +303,77 @@ namespace FractalTicTacToe.Core
                 return false;
             }
 
+            // Si no se ha realizado ningún movimiento aún, cancelar la partida sin variación de puntos
+            if (State.MoveCount == 0)
+            {
+                FinalizeMatch(Player.None, MatchEndReason.Aborted);
+                return true;
+            }
+
             Player winner = role == Player.X ? Player.O : Player.X;
             FinalizeMatch(winner, MatchEndReason.Resignation);
             return true;
         }
 
         /// <summary>
+        /// Cancela la partida si transcurrieron los 30 segundos iniciales sin que se realice el primer movimiento.
+        /// No suma ni resta puntos de clasificación.
+        /// </summary>
+        public bool AbortByFirstMoveTimeout()
+        {
+            if (IsMatchOver || State.MoveCount > 0)
+            {
+                return false;
+            }
+
+            FinalizeMatch(Player.None, MatchEndReason.Aborted);
+            return true;
+        }
+
+        /// <summary>
         /// Declara el fin de la partida por desconexión o agotamiento de tiempo de un jugador.
         /// </summary>
-        public bool ForfeitByDisconnectOrTimeout(string disconnectedPlayerId, bool isTimeout = false)
+        public bool ForfeitByDisconnectOrTimeout(string disconnectedOrTimedOutPlayerId, bool isTimeout = false)
         {
             if (IsMatchOver)
             {
                 return false;
             }
 
-            Player role = GetPlayerRole(disconnectedPlayerId);
+            Player role = GetPlayerRole(disconnectedOrTimedOutPlayerId);
             if (role == Player.None)
             {
                 return false;
             }
 
+            if (State.MoveCount == 0)
+            {
+                FinalizeMatch(Player.None, MatchEndReason.Aborted);
+                return true;
+            }
+
             Player winner = role == Player.X ? Player.O : Player.X;
             FinalizeMatch(winner, isTimeout ? MatchEndReason.Timeout : MatchEndReason.DisconnectForfeit);
+            return true;
+        }
+
+        /// <summary>
+        /// Registra la solicitud de revancha de uno de los jugadores tras finalizar la partida.
+        /// </summary>
+        public bool RegisterRematchVote(string playerId, out Player requesterRole, out bool bothPlayersAccepted)
+        {
+            requesterRole = GetPlayerRole(playerId);
+            bothPlayersAccepted = false;
+
+            if (!IsMatchOver || requesterRole == Player.None)
+            {
+                return false;
+            }
+
+            if (requesterRole == Player.X) _rematchRequestedByX = true;
+            if (requesterRole == Player.O) _rematchRequestedByO = true;
+
+            bothPlayersAccepted = _rematchRequestedByX && _rematchRequestedByO;
             return true;
         }
 
@@ -332,18 +383,29 @@ namespace FractalTicTacToe.Core
             EndReason = reason;
             EffectiveWinner = winner;
 
+            // Garantizar que el GameState quede marcado como terminado con el ganador efectivo antes de exportar FEN
+            State.ForceConclude(winner);
+
             int eloXBefore = PlayerX.EloRating;
             int eloOBefore = PlayerO.EloRating;
+            EloMatchUpdate update;
 
-            EloMatchUpdate update = EloRatingCalculator.CalculateMatchRatingChange(
-                eloXBefore,
-                PlayerX.GamesPlayed,
-                eloOBefore,
-                PlayerO.GamesPlayed,
-                winner);
+            if (reason == MatchEndReason.Aborted)
+            {
+                update = new EloMatchUpdate(eloXBefore, 0, eloOBefore, 0);
+            }
+            else
+            {
+                update = EloRatingCalculator.CalculateMatchRatingChange(
+                    eloXBefore,
+                    PlayerX.GamesPlayed,
+                    eloOBefore,
+                    PlayerO.GamesPlayed,
+                    winner);
 
-            PlayerX.ApplyMatchResult(Player.X, winner, update.NewRatingX);
-            PlayerO.ApplyMatchResult(Player.O, winner, update.NewRatingO);
+                PlayerX.ApplyMatchResult(Player.X, winner, update.NewRatingX);
+                PlayerO.ApplyMatchResult(Player.O, winner, update.NewRatingO);
+            }
 
             CompletedEloUpdate = update;
             CompletedMatchRecord = new MatchRecord

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace FractalTicTacToe.Core
@@ -15,17 +16,19 @@ namespace FractalTicTacToe.Core
         GlobalDraw = 2,
         Resignation = 3,
         Timeout = 4,
-        DisconnectForfeit = 5
+        DisconnectForfeit = 5,
+        Aborted = 6
     }
 
     /// <summary>
-    /// Perfil de cuenta de jugador con estadísticas acumuladas y rating ELO tipo ajedrez.
+    /// Perfil de cuenta de jugador con estadísticas acumuladas, credenciales autenticadas y puntaje competitivo.
     /// Diseñado para persistencia local o base de datos de cuentas en línea.
     /// </summary>
     public sealed class PlayerProfile
     {
         public string PlayerId { get; set; }
         public string Username { get; set; }
+        public string PasswordHash { get; set; } = string.Empty;
         public int EloRating { get; set; }
         public int Wins { get; set; }
         public int Losses { get; set; }
@@ -40,6 +43,42 @@ namespace FractalTicTacToe.Core
             PlayerId = string.IsNullOrWhiteSpace(playerId) ? Guid.NewGuid().ToString("N") : playerId;
             Username = string.IsNullOrWhiteSpace(username) ? "Jugador" : username;
             EloRating = initialElo;
+        }
+
+        public void SetPassword(string plainPassword)
+        {
+            PasswordHash = ComputePasswordHash(plainPassword);
+        }
+
+        public bool VerifyPassword(string plainPassword)
+        {
+            if (string.IsNullOrEmpty(PasswordHash))
+            {
+                return true;
+            }
+
+            string incomingHash = ComputePasswordHash(plainPassword ?? string.Empty);
+            return string.Equals(PasswordHash, incomingHash, StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static string ComputePasswordHash(string plainPassword)
+        {
+            if (string.IsNullOrEmpty(plainPassword))
+            {
+                return string.Empty;
+            }
+
+            using (var sha256 = SHA256.Create())
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes("GatoteFractalSalt::" + plainPassword);
+                byte[] hash = sha256.ComputeHash(bytes);
+                var sb = new StringBuilder(hash.Length * 2);
+                for (int i = 0; i < hash.Length; i++)
+                {
+                    sb.Append(hash[i].ToString("x2", CultureInfo.InvariantCulture));
+                }
+                return sb.ToString();
+            }
         }
 
         public void ApplyMatchResult(Player assignedRole, Player winner, int newEloRating)

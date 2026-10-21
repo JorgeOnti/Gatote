@@ -306,12 +306,25 @@ namespace FractalTicTacToe.Core
                 return false;
             }
 
-            ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
-            Winner = timedOutPlayer == Player.X ? Player.O : Player.X;
-            IsGameOver = true;
-            ActiveBoardIndex = FreeMoveBoardIndex;
-            ZobristKey ^= ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
+            ForceConclude(timedOutPlayer == Player.X ? Player.O : Player.X);
             return true;
+        }
+
+        /// <summary>
+        /// Fuerza la conclusión inmediata del estado (por rendición, tiempo agotado, desconexión o cancelación),
+        /// garantizando que <see cref="IsGameOver"/>, <see cref="Winner"/> y la exportación FEN reflejen el resultado.
+        /// </summary>
+        public void ForceConclude(Player winner)
+        {
+            if (!IsGameOver)
+            {
+                ZobristKey ^= ZobristHasher.GetActiveBoardKey(ActiveBoardIndex);
+                ActiveBoardIndex = FreeMoveBoardIndex;
+                ZobristKey ^= ZobristHasher.GetActiveBoardKey(FreeMoveBoardIndex);
+            }
+
+            Winner = winner;
+            IsGameOver = true;
         }
 
         /// <summary>

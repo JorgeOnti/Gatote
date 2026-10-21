@@ -13,8 +13,8 @@ namespace FractalTicTacToe.Server
 {
     /// <summary>
     /// Servidor dedicado autoritativo en tiempo real para Fractal Tic-Tac-Toe Online.
-    /// Gestiona conexiones de jugadores, cuentas, emparejamiento por ELO, validación de movimientos
-    /// y flujo de confirmación mutua para deshacer jugadas (Takeback).
+    /// Gestiona registro/inicio de sesión con contraseña, emparejamiento estricto por control de tiempo y puntaje,
+    /// validación de movimientos, Takeback con consentimiento mutuo, derrota por tiempo, cancelación a los 30s y revanchas.
     /// </summary>
     public static class Program
     {
@@ -37,7 +37,7 @@ namespace FractalTicTacToe.Server
             Console.WriteLine("╚══════════════════════════════════════════════════════════════════════╝");
             Console.WriteLine($"  Puerto TCP       : {port}");
             Console.WriteLine($"  Datos persistidos: ./{DataDirectory}/ (accounts.tsv, matches.pgn)");
-            Console.WriteLine("  Protocolo        : LOGIN, QUEUE, MOVE, TAKEBACK_REQ, TAKEBACK_RESP, RESIGN");
+            Console.WriteLine("  Protocolo        : REGISTER, LOGIN, QUEUE, MOVE, TAKEBACK, TIMEOUT, ABORT, REMATCH");
             Console.WriteLine("  Presiona Ctrl+C para detener el servidor de forma segura.\n");
 
             var cts = new CancellationTokenSource();
@@ -89,7 +89,7 @@ namespace FractalTicTacToe.Server
                         string rawLine = await reader.ReadLineAsync().ConfigureAwait(false);
                         if (rawLine == null)
                         {
-                            break; // Cliente desconectado
+                            break;
                         }
 
                         ProcessCommand(connection, rawLine);
@@ -118,6 +118,22 @@ namespace FractalTicTacToe.Server
 
             switch (cmd)
             {
+                case MultiplayerProtocol.CmdRegister:
+                    if (parts.Length < 3)
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError("Debes proporcionar usuario y contraseña para registrarte."));
+                        return;
+                    }
+
+                    if (!Matchmaking.RegisterAccount(parts[1], parts[2], out PlayerProfile registeredProfile, out string regError))
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError(regError));
+                        return;
+                    }
+
+                    CompleteClientAuthentication(sender, registeredProfile, "REGISTRO");
+                    break;
+
                 case MultiplayerProtocol.CmdLogin:
                     if (parts.Length < 2 || string.IsNullOrWhiteSpace(parts[1]))
                     {
@@ -125,32 +141,50 @@ namespace FractalTicTacToe.Server
                         return;
                     }
 
-                    PlayerProfile profile = Matchmaking.GetOrCreateAccount(parts[1]);
-                    sender.PlayerId = profile.PlayerId;
-                    sender.Username = profile.Username;
-                    ConnectedClientsByPlayerId[profile.PlayerId] = sender;
+                    PlayerProfile loginProfile;
+                    if (parts.Length >= 3)
+                    {
+                        if (!Matchmaking.AuthenticateAccount(parts[1], parts[2], out loginProfile, out string authError))
+                        {
+                            sender.Send(MultiplayerProtocol.BuildError(authError));
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        loginProfile = Matchmaking.GetOrCreateAccount(parts[1]);
+                    }
 
-                    Matchmaking.SaveToDirectory(DataDirectory);
-                    sender.Send(MultiplayerProtocol.BuildAuthOk(profile));
-                    Console.WriteLine($"[LOGIN] {profile}");
+                    CompleteClientAuthentication(sender, loginProfile, "LOGIN");
                     break;
 
                 case MultiplayerProtocol.CmdQueue:
                     if (!EnsureAuthenticated(sender)) return;
 
                     int maxGap = parts.Length >= 2 && int.TryParse(parts[1], out int g) ? g : 400;
-                    OnlineMatchRoom matchedRoom = Matchmaking.EnqueueOrMatchPlayer(sender.PlayerId, maxGap);
+                    TimeControlConfig requestedTime = parts.Length >= 3
+                        ? TimeControlConfig.FromCode(parts[2])
+                        : TimeControlConfig.Blitz3Plus2;
+
+                    OnlineMatchRoom matchedRoom = Matchmaking.EnqueueOrMatchPlayer(sender.PlayerId, requestedTime, maxGap);
 
                     if (matchedRoom == null)
                     {
                         PlayerProfile p = Matchmaking.GetAccountById(sender.PlayerId);
-                        sender.Send($"{MultiplayerProtocol.EvtQueued}|{p.EloRating}");
-                        Console.WriteLine($"[COLA] {sender.Username} ({p.EloRating} ELO) buscando oponente...");
+                        sender.Send($"{MultiplayerProtocol.EvtQueued}|{p.EloRating}|{requestedTime.ToCode()}");
+                        Console.WriteLine($"[COLA] {sender.Username} ({p.EloRating} pts) buscando rival en modo {requestedTime.Name} ({requestedTime.ToCode()})...");
                     }
                     else
                     {
                         BindRoomEventsAndNotifyStart(matchedRoom);
                     }
+                    break;
+
+                case MultiplayerProtocol.CmdCancelQueue:
+                    if (!EnsureAuthenticated(sender)) return;
+                    Matchmaking.RemoveFromQueue(sender.PlayerId);
+                    sender.Send(MultiplayerProtocol.EvtQueueCancelled);
+                    Console.WriteLine($"[COLA CANCELADA] {sender.Username} salió de la cola de búsqueda.");
                     break;
 
                 case MultiplayerProtocol.CmdMove:
@@ -230,12 +264,48 @@ namespace FractalTicTacToe.Server
                     }
                     break;
 
+                case MultiplayerProtocol.CmdTimeout:
+                    if (!EnsureAuthenticated(sender)) return;
+                    if (parts.Length < 2) return;
+
+                    OnlineMatchRoom timeoutRoom = Matchmaking.GetRoom(parts[1]);
+                    timeoutRoom?.ForfeitByDisconnectOrTimeout(sender.PlayerId, isTimeout: true);
+                    break;
+
+                case MultiplayerProtocol.CmdAbort:
+                    if (!EnsureAuthenticated(sender)) return;
+                    if (parts.Length < 2) return;
+
+                    OnlineMatchRoom abortRoom = Matchmaking.GetRoom(parts[1]);
+                    abortRoom?.AbortByFirstMoveTimeout();
+                    break;
+
+                case MultiplayerProtocol.CmdRematchRequest:
+                    if (!EnsureAuthenticated(sender)) return;
+                    if (parts.Length < 2) return;
+
+                    OnlineMatchRoom prevRoom = Matchmaking.GetRoom(parts[1]);
+                    if (prevRoom != null && prevRoom.RegisterRematchVote(sender.PlayerId, out Player reqRole, out bool bothAccepted))
+                    {
+                        if (bothAccepted)
+                        {
+                            OnlineMatchRoom rematchRoom = Matchmaking.CreateRematchRoom(prevRoom);
+                            BindRoomEventsAndNotifyStart(rematchRoom);
+                        }
+                        else
+                        {
+                            BroadcastToRoom(prevRoom, MultiplayerProtocol.BuildRematchOffered(prevRoom, reqRole));
+                        }
+                    }
+                    break;
+
                 case MultiplayerProtocol.CmdLeaderboard:
                     List<PlayerProfile> top = Matchmaking.GetLeaderboard(10);
                     var sbLb = new StringBuilder("LEADERBOARD");
-                    foreach (PlayerProfile item in top)
+                    for (int i = 0; i < top.Count; i++)
                     {
-                        sbLb.Append('|').Append($"{item.Username}:{item.EloRating}({item.RankTitle})");
+                        PlayerProfile item = top[i];
+                        sbLb.Append('|').Append($"{i + 1}:{item.Username}:{item.EloRating}:{item.RankTitle}:{item.Wins}V-{item.Losses}D-{item.Draws}E");
                     }
                     sender.Send(sbLb.ToString());
                     break;
@@ -257,9 +327,20 @@ namespace FractalTicTacToe.Server
             }
         }
 
+        private static void CompleteClientAuthentication(ClientConnection sender, PlayerProfile profile, string tag)
+        {
+            sender.PlayerId = profile.PlayerId;
+            sender.Username = profile.Username;
+            ConnectedClientsByPlayerId[profile.PlayerId] = sender;
+
+            Matchmaking.SaveToDirectory(DataDirectory);
+            sender.Send(MultiplayerProtocol.BuildAuthOk(profile));
+            Console.WriteLine($"[{tag}] {profile}");
+        }
+
         private static void BindRoomEventsAndNotifyStart(OnlineMatchRoom room)
         {
-            Console.WriteLine($"[PARTIDA INICIADA] Sala {room.RoomId}: [X] {room.PlayerX.Username} vs [O] {room.PlayerO.Username}");
+            Console.WriteLine($"[PARTIDA INICIADA] Sala {room.RoomId} ({room.TimeControl.Name}): [X] {room.PlayerX.Username} vs [O] {room.PlayerO.Username}");
 
             if (ConnectedClientsByPlayerId.TryGetValue(room.PlayerX.PlayerId, out ClientConnection clientX))
             {
@@ -300,7 +381,7 @@ namespace FractalTicTacToe.Server
                 Matchmaking.SaveToDirectory(DataDirectory);
                 Console.WriteLine(
                     $"[FIN DE PARTIDA] Sala {r.RoomId} | Ganador: {record.Winner} ({record.EndReason}) | " +
-                    $"ELO X: {record.PlayerXEloBefore}->{record.PlayerXEloAfter}, ELO O: {record.PlayerOEloBefore}->{record.PlayerOEloAfter}");
+                    $"Pts X: {record.PlayerXEloBefore}->{record.PlayerXEloAfter}, Pts O: {record.PlayerOEloBefore}->{record.PlayerOEloAfter}");
             };
         }
 
@@ -338,7 +419,7 @@ namespace FractalTicTacToe.Server
         {
             if (string.IsNullOrEmpty(sender.PlayerId))
             {
-                sender.Send(MultiplayerProtocol.BuildError("Debes iniciar sesión primero con LOGIN|<username>."));
+                sender.Send(MultiplayerProtocol.BuildError("Debes iniciar sesión primero."));
                 return false;
             }
             return true;

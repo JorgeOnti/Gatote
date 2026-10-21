@@ -52,7 +52,10 @@ namespace FractalTicTacToe.Core
             TimeControlConfig? timeControl = null)
         {
             State = new GameState();
-            Clock = new MatchClock(timeControl ?? TimeControlConfig.Blitz3Plus2);
+            TimeControlConfig defaultClock = (mode == SessionMode.HumanVsBotX || mode == SessionMode.BotVsHumanO)
+                ? TimeControlConfig.Unlimited
+                : TimeControlConfig.Blitz3Plus2;
+            Clock = new MatchClock(timeControl ?? defaultClock);
             Clock.TimeExpired += OnClockTimeExpired;
             ConfigureSession(mode, difficulty, humanProfile);
         }
@@ -310,25 +313,32 @@ namespace FractalTicTacToe.Core
         private void CommitMatchRatingAndRecord(MatchEndReason reason)
         {
             LastEndReason = reason;
-            EloMatchUpdate eloUpdate = EloRatingCalculator.CalculateMatchRatingChange(
-                ProfileX.EloRating,
-                ProfileX.GamesPlayed,
-                ProfileO.EloRating,
-                ProfileO.GamesPlayed,
-                State.Winner);
 
-            MatchRecord record = MatchRecord.CreateFromGame(
-                State,
-                ProfileX,
-                ProfileO,
-                updateProfilesIfGameOver: true);
-            record.EndReason = reason;
+            // REGLA DE NEGOCIO: Las partidas locales (contra IA o 2 jugadores en el mismo dispositivo)
+            // NO suman ni restan puntaje competitivo; el puntaje es exclusivo de partidas en línea.
+            var zeroDeltaUpdate = new EloMatchUpdate(ProfileX.EloRating, 0, ProfileO.EloRating, 0);
 
-            _matchHistory.Add(record);
-            LastEloUpdate = eloUpdate;
+            var record = new MatchRecord
+            {
+                MatchId = Guid.NewGuid().ToString("N"),
+                PlayedAtUtc = DateTime.UtcNow,
+                PlayerXName = ProfileX.Username,
+                PlayerOName = ProfileO.Username,
+                PlayerXEloBefore = ProfileX.EloRating,
+                PlayerOEloBefore = ProfileO.EloRating,
+                PlayerXEloAfter = ProfileX.EloRating,
+                PlayerOEloAfter = ProfileO.EloRating,
+                Winner = State.Winner,
+                EndReason = reason,
+                FinalFen = GameSerializer.ToFen(State),
+                MoveTranscript = GameSerializer.ExportMoveHistory(State)
+            };
+
+            _matchHistory.Insert(0, record);
+            LastEloUpdate = null;
             _eloCommittedForCurrentMatch = true;
 
-            MatchCompleted?.Invoke(record, eloUpdate);
+            MatchCompleted?.Invoke(record, zeroDeltaUpdate);
         }
 
         private static int GetBotBaseElo(BotDifficulty difficulty)

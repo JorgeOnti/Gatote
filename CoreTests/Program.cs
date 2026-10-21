@@ -404,16 +404,26 @@ namespace CoreTests
         private static void TestOnlineMatchmakingAndMutualConsentTakeback()
         {
             var matchmaking = new MatchmakingService();
-            PlayerProfile alice = matchmaking.GetOrCreateAccount("Alice");
+
+            // 1. Verificar Registro y Login con contraseña
+            Assert(matchmaking.RegisterAccount("Alice", "pass1234", out PlayerProfile alice, out _), "Registro de Alice exitoso.");
+            Assert(!matchmaking.RegisterAccount("Alice", "otraClave", out _, out _), "No debe permitir registrar un usuario duplicado.");
+            Assert(!matchmaking.AuthenticateAccount("Alice", "claveIncorrecta", out _, out _), "Debe rechazar contraseña incorrecta.");
+            Assert(matchmaking.AuthenticateAccount("Alice", "pass1234", out PlayerProfile authAlice, out _) && authAlice.PlayerId == alice.PlayerId, "Login de Alice con contraseña correcta.");
+
             PlayerProfile bob = matchmaking.GetOrCreateAccount("Bob");
+            PlayerProfile charlie5Plus0 = matchmaking.GetOrCreateAccount("Charlie");
             PlayerProfile grandmaster = matchmaking.GetOrCreateAccount("Grandmaster");
             grandmaster.EloRating = 2100;
 
-            Assert(matchmaking.EnqueueOrMatchPlayer(alice.PlayerId, maxEloGap: 300) == null, "Alice (1200) entra en la cola.");
-            Assert(matchmaking.EnqueueOrMatchPlayer(grandmaster.PlayerId, maxEloGap: 300) == null, "Grandmaster (2100) NO debe emparejarse con Alice (1200) cuando maxEloGap=300.");
+            // 2. Verificar aislamiento estricto por Modo de Tiempo (3+2 vs 5+0 NO deben sincronizarse)
+            Assert(matchmaking.EnqueueOrMatchPlayer(alice.PlayerId, TimeControlConfig.Blitz3Plus2, maxEloGap: 300) == null, "Alice (1200) entra en la cola Blitz 3+2.");
+            Assert(matchmaking.EnqueueOrMatchPlayer(charlie5Plus0.PlayerId, TimeControlConfig.Rapid5Plus0, maxEloGap: 300) == null, "Charlie (1200) en Rápida 5+0 NO debe emparejarse con Alice en Blitz 3+2.");
+            Assert(matchmaking.EnqueueOrMatchPlayer(grandmaster.PlayerId, TimeControlConfig.Blitz3Plus2, maxEloGap: 300) == null, "Grandmaster (2100) NO debe emparejarse con Alice (1200) cuando maxEloGap=300.");
 
-            OnlineMatchRoom room = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId, maxEloGap: 300);
-            Assert(room != null, "Bob (1200) sí debe emparejarse con Alice (1200).");
+            OnlineMatchRoom room = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId, TimeControlConfig.Blitz3Plus2, maxEloGap: 300);
+            Assert(room != null, "Bob (1200) buscando en el mismo modo Blitz 3+2 sí debe emparejarse con Alice (1200).");
+            Assert(room.TimeControl.ToCode() == "3+2", "La sala debe crearse con el modo Blitz 3+2.");
 
             string idX = room.PlayerX.PlayerId;
             string idO = room.PlayerO.PlayerId;
@@ -439,17 +449,21 @@ namespace CoreTests
             Assert(room.RespondToTakeback(idO, accept: true, out _), "O acepta deshacer los 2 medios turnos.");
             Assert(room.State.MoveCount == 0 && room.State.CurrentPlayer == Player.X, "El tablero regresa a 0 movimientos y turno de X.");
 
+            // Verificar que si ya hubo movimientos y alguien se rinde o agota tiempo, cuenta como victoria y actualiza puntos
+            Assert(room.SubmitMove(idX, new Move(4, 4), out _), "X realiza el primer movimiento.");
             Assert(room.Resign(idO, out _), "O se rinde.");
             Assert(room.IsMatchOver && room.EffectiveWinner == Player.X && room.EndReason == MatchEndReason.Resignation, "X gana por rendición de O.");
+            Assert(room.State.IsGameOver && room.State.Winner == Player.X, "El GameState interno de la sala debe quedar marcado como IsGameOver con Winner=X.");
 
-            // Verificar persistencia en directorio temporal
+            // Verificar persistencia en directorio temporal (incluyendo contraseña cifrada)
             string tempDir = Path.Combine(Path.GetTempPath(), "FractalTTT_Test_" + Guid.NewGuid().ToString("N"));
             try
             {
                 matchmaking.SaveToDirectory(tempDir);
                 var reloaded = new MatchmakingService();
                 reloaded.LoadFromDirectory(tempDir);
-                Assert(reloaded.GetLeaderboard().Count == 3, "Deben cargarse las 3 cuentas desde disco.");
+                Assert(reloaded.GetLeaderboard().Count == 4, "Deben cargarse las 4 cuentas desde disco.");
+                Assert(reloaded.AuthenticateAccount("Alice", "pass1234", out _, out _), "Debe conservar el hash de contraseña de Alice tras recargar.");
                 Assert(reloaded.GetPlayerMatchHistory("Alice").Count == 1, "Debe cargarse el historial de partidas de Alice.");
             }
             finally
@@ -467,8 +481,8 @@ namespace CoreTests
             PlayerProfile alice = matchmaking.GetOrCreateAccount("Alice");
             PlayerProfile bob = matchmaking.GetOrCreateAccount("Bob");
 
-            matchmaking.EnqueueOrMatchPlayer(alice.PlayerId);
-            OnlineMatchRoom room = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId);
+            matchmaking.EnqueueOrMatchPlayer(alice.PlayerId, TimeControlConfig.Blitz3Plus2);
+            OnlineMatchRoom room = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId, TimeControlConfig.Blitz3Plus2);
 
             using (var clientX = new OnlineMultiplayerClient())
             using (var clientO = new OnlineMultiplayerClient())
@@ -482,11 +496,18 @@ namespace CoreTests
                 Assert(clientX.IsInActiveMatch && clientX.AssignedRole == Player.X, "Cliente X debe estar activo con rol X.");
                 Assert(clientO.IsInActiveMatch && clientO.AssignedRole == Player.O, "Cliente O debe estar activo con rol O.");
 
+                // Verificar regla estilo Lichess: antes del primer tiro corre el contador de 30s, NO el reloj principal
+                Assert(clientX.Clock.IsWaitingForFirstMove && !clientX.Clock.IsRunning, "El reloj principal no debe correr antes del primer movimiento.");
+                clientX.TickClock(10.0);
+                Assert(Math.Abs(clientX.Clock.RemainingSecondsX - 180.0) < 0.001, "El reloj principal de X debe seguir intacto en 180s antes del primer tiro.");
+                Assert(Math.Abs(clientX.Clock.FirstMoveSecondsRemaining - 20.0) < 0.001, "El temporizador de primer movimiento debe bajar a 20s.");
+
                 room.SubmitMove(room.PlayerX.PlayerId, new Move(4, 4), out _);
                 string syncPacket = MultiplayerProtocol.BuildStateSync(room, new Move(4, 4));
                 clientX.ProcessServerPacket(syncPacket);
                 clientO.ProcessServerPacket(syncPacket);
 
+                Assert(!clientX.Clock.IsWaitingForFirstMove && clientX.Clock.IsRunning, "Tras el primer movimiento se desactiva la cuenta de 30s y arranca el reloj principal.");
                 Assert(clientO.State.MoveCount == 1 && clientO.State.ActiveBoardIndex == 4, "Cliente O debe sincronizar el movimiento (4,4).");
 
                 room.RequestTakeback(room.PlayerX.PlayerId, out TakebackRequest tbReq, out _);
@@ -504,6 +525,21 @@ namespace CoreTests
 
                 Assert(!clientO.HasIncomingTakebackOffer && !clientX.IsWaitingForOpponentTakebackResponse, "El estado de Takeback pendiente debe limpiarse.");
                 Assert(clientX.State.MoveCount == 0 && clientO.State.MoveCount == 0, "Ambos clientes deben haber revertido la jugada sincronizadamente.");
+
+                // Simular un movimiento y luego derrota por Tiempo Agotado (Timeout) de O en línea
+                room.SubmitMove(room.PlayerX.PlayerId, new Move(4, 4), out _);
+                string syncAfterRedo = MultiplayerProtocol.BuildStateSync(room, new Move(4, 4));
+                clientX.ProcessServerPacket(syncAfterRedo);
+                clientO.ProcessServerPacket(syncAfterRedo);
+
+                Assert(room.ForfeitByDisconnectOrTimeout(room.PlayerO.PlayerId, isTimeout: true), "O pierde por tiempo agotado.");
+                string matchEndPacket = MultiplayerProtocol.BuildMatchEnd(room, room.CompletedMatchRecord, room.CompletedEloUpdate.Value);
+                clientX.ProcessServerPacket(matchEndPacket);
+                clientO.ProcessServerPacket(matchEndPacket);
+
+                Assert(clientX.State.IsGameOver && clientX.State.Winner == Player.X, "Cliente X debe ver la partida terminada y a X como ganador por tiempo.");
+                Assert(!clientX.IsInActiveMatch && !clientO.IsInActiveMatch, "IsInActiveMatch debe ser false al terminar para deshabilitar Rendirse.");
+                Assert(clientX.LastRatingUpdate.HasValue && clientX.LastRatingUpdate.Value.DeltaX > 0, "Cliente X debe recibir el delta positivo de puntos (+pts).");
             }
         }
 
@@ -512,6 +548,10 @@ namespace CoreTests
             GameState winGame = GameSerializer.ImportMoveHistory("01-10-02-20-00");
             Assert(winGame.TryGetWinningLine(out int winBoard, out int c0, out int c1, out int c2), "Debe detectar la línea ganadora.");
             Assert(winBoard == 0 && c0 == 0 && c1 == 1 && c2 == 2, $"Línea ganadora esperada (Tablero 0: 0,1,2), obtenida ({winBoard}: {c0},{c1},{c2}).");
+
+            // Verificar que el modo contra IA por defecto no tiene límite de tiempo
+            var aiSession = new GameSessionController(SessionMode.HumanVsBotX, BotDifficulty.Hard);
+            Assert(aiSession.Clock.Config.IsUntimed, "El modo contra IA debe ser sin límite de tiempo (IsUntimed).");
 
             var session = new GameSessionController(
                 SessionMode.PassAndPlay2P,
@@ -529,7 +569,7 @@ namespace CoreTests
             Assert(session.TickClock(180.5), "El tick que agota el reloj de O debe retornar true.");
             Assert(session.State.IsGameOver && session.State.Winner == Player.X, "X debe ganar por tiempo agotado de O.");
             Assert(session.LastEndReason == MatchEndReason.Timeout, "El motivo de fin de partida debe ser Timeout.");
-            Assert(session.LastEloUpdate.HasValue && session.LastEloUpdate.Value.DeltaX > 0, "Debe calcular el delta de Rating (+pts) tras ganar por tiempo.");
+            Assert(!session.LastEloUpdate.HasValue && session.ProfileX.EloRating == 1200, "Las partidas locales no deben sumar ni restar puntos competitivos.");
         }
 
         private static void TestMatchReplayNavigatorStepByStep()
