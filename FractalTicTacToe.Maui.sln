@@ -1,0 +1,41 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34330.188
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FractalTicTacToe.Maui", "FractalTicTacToe.Maui\FractalTicTacToe.Maui.csproj", "{D48B9211-8B5B-4372-9C9D-59E204E602A1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FractalTicTacToe.Core", "FractalTicTacToe.Core\FractalTicTacToe.Core.csproj", "{69451267-4278-4BB2-9FB8-6A8B7377FEF9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FractalTicTacToe.Server", "FractalTicTacToe.Server\FractalTicTacToe.Server.csproj", "{A7BA87C6-D94B-46D5-A998-287307E3102D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CoreTests", "CoreTests\CoreTests.csproj", "{E9B7536A-82FC-46CE-BE50-91D674A7941A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D48B9211-8B5B-4372-9C9D-59E204E602A1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D48B9211-8B5B-4372-9C9D-59E204E602A1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D48B9211-8B5B-4372-9C9D-59E204E602A1}.Debug|Any CPU.Deploy.0 = Debug|Any CPU
+		{D48B9211-8B5B-4372-9C9D-59E204E602A1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D48B9211-8B5B-4372-9C9D-59E204E602A1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D48B9211-8B5B-4372-9C9D-59E204E602A1}.Release|Any CPU.Deploy.0 = Release|Any CPU
+		{69451267-4278-4BB2-9FB8-6A8B7377FEF9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{69451267-4278-4BB2-9FB8-6A8B7377FEF9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{69451267-4278-4BB2-9FB8-6A8B7377FEF9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{69451267-4278-4BB2-9FB8-6A8B7377FEF9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A7BA87C6-D94B-46D5-A998-287307E3102D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A7BA87C6-D94B-46D5-A998-287307E3102D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A7BA87C6-D94B-46D5-A998-287307E3102D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A7BA87C6-D94B-46D5-A998-287307E3102D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E9B7536A-82FC-46CE-BE50-91D674A7941A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E9B7536A-82FC-46CE-BE50-91D674A7941A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E9B7536A-82FC-46CE-BE50-91D674A7941A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E9B7536A-82FC-46CE-BE50-91D674A7941A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

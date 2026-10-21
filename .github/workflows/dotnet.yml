@@ -20,10 +20,10 @@ jobs:
         dotnet-version: 8.0.x
 
     - name: Restaurar dependencias (NuGet)
-      run: dotnet restore
+      run: dotnet restore FractalTicTacToe.sln
 
     - name: Compilar el proyecto completo
-      run: dotnet build --no-restore --configuration Release
+      run: dotnet build FractalTicTacToe.sln --no-restore --configuration Release
 
     - name: Ejecutar la Suite de Pruebas Personalizada
       run: dotnet run --project CoreTests/CoreTests.csproj --configuration Release
