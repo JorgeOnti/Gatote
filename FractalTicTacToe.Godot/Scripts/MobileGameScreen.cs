@@ -17,6 +17,7 @@ namespace FractalTicTacToe.GodotClient
         private const string DefaultServerHost = "127.0.0.1";
         private const int DefaultServerPort = 7777;
         private const string LocalAccountsFilePath = "user://local_accounts.tsv";
+        private const string SavedSessionFilePath = "user://AuthData/saved_session.txt";
 
         private enum ScreenState
         {
@@ -44,6 +45,7 @@ namespace FractalTicTacToe.GodotClient
         private readonly MatchmakingService _localAuthStore = new MatchmakingService();
         private bool _isOnlineMode;
         private string _authenticatedUsername = string.Empty;
+        private string _authenticatedPassword = string.Empty;
         private double _queueElapsedSeconds;
 
         // Historial de partidas jugadas por el usuario (la posición 0 es SIEMPRE la última partida jugada)
@@ -111,6 +113,12 @@ namespace FractalTicTacToe.GodotClient
 
         private PanelContainer _takebackOfferPanel;
         private Label _takebackOfferLabel;
+
+        private PanelContainer _rematchOfferPanel;
+        private Label _rematchOfferLabel;
+
+        private PanelContainer _abortedMatchPromptPanel;
+        private Label _abortedMatchPromptLabel;
 
         private PanelContainer _statusBannerPanel;
         private Label _statusBannerLabel;
@@ -200,7 +208,22 @@ namespace FractalTicTacToe.GodotClient
             _onlineClient.LeaderboardReceived += OnLeaderboardReceived;
 
             BuildMultiScreenMobileApp();
-            NavigateToScreen(ScreenState.AuthScreen);
+
+            // Si el usuario ya inició sesión una vez, entrar directamente a Inicio sin pedir login de nuevo
+            if (TryLoadSavedSession(out string savedUser, out string savedPass))
+            {
+                _authenticatedUsername = savedUser;
+                _authenticatedPassword = savedPass;
+                _localSession.ProfileX.Username = savedUser;
+                NavigateToScreen(ScreenState.HomeLobby);
+                _ = AuthenticateSavedSessionInBackgroundAsync(savedUser, savedPass);
+            }
+            else
+            {
+                // Solo para usuarios nuevos (o tras cerrar sesión explícitamente)
+                NavigateToScreen(ScreenState.AuthScreen);
+            }
+
             RefreshUI();
         }
 
@@ -499,6 +522,7 @@ namespace FractalTicTacToe.GodotClient
                 return;
             }
 
+            _authenticatedPassword = password;
             _pendingRegisterAction = isRegister;
             _loginBtn.Disabled = true;
             _registerBtn.Disabled = true;
@@ -542,6 +566,18 @@ namespace FractalTicTacToe.GodotClient
             }
         }
 
+        private async System.Threading.Tasks.Task AuthenticateSavedSessionInBackgroundAsync(string username, string password)
+        {
+            try
+            {
+                await _onlineClient.ConnectAndLoginAsync(DefaultServerHost, DefaultServerPort, username, password);
+            }
+            catch
+            {
+                // Si el servidor no está activo al abrir la app, permanece en Inicio y reconectará al buscar partida
+            }
+        }
+
         private void OnOnlineAuthenticated(string username, int rating, string rank)
         {
             Callable.From(() =>
@@ -557,6 +593,11 @@ namespace FractalTicTacToe.GodotClient
             _authenticatedUsername = username;
             _localSession.ProfileX.Username = username;
 
+            if (!string.IsNullOrEmpty(_authenticatedPassword))
+            {
+                SaveSessionToDisk(_authenticatedUsername, _authenticatedPassword);
+            }
+
             if (_currentScreen == ScreenState.AuthScreen)
             {
                 NavigateToScreen(ScreenState.HomeLobby);
@@ -564,6 +605,67 @@ namespace FractalTicTacToe.GodotClient
             else
             {
                 RefreshUI();
+            }
+        }
+
+        private void SaveSessionToDisk(string username, string password)
+        {
+            try
+            {
+                string globalDir = ProjectSettings.GlobalizePath("user://AuthData");
+                System.IO.Directory.CreateDirectory(globalDir);
+                string sessionFile = System.IO.Path.Combine(globalDir, "saved_session.txt");
+                System.IO.File.WriteAllText(sessionFile, $"{username}\t{password}");
+            }
+            catch
+            {
+                // Ignorar errores de disco
+            }
+        }
+
+        private bool TryLoadSavedSession(out string username, out string password)
+        {
+            username = string.Empty;
+            password = string.Empty;
+            try
+            {
+                string globalDir = ProjectSettings.GlobalizePath("user://AuthData");
+                string sessionFile = System.IO.Path.Combine(globalDir, "saved_session.txt");
+                if (!System.IO.File.Exists(sessionFile))
+                {
+                    return false;
+                }
+
+                string raw = System.IO.File.ReadAllText(sessionFile).Trim();
+                string[] parts = raw.Split('\t');
+                if (parts.Length >= 2 && parts[0].Trim().Length >= 3 && parts[1].Trim().Length >= 4)
+                {
+                    username = parts[0].Trim();
+                    password = parts[1].Trim();
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignorar
+            }
+            return false;
+        }
+
+        private void ClearSavedSessionFromDisk()
+        {
+            try
+            {
+                string globalDir = ProjectSettings.GlobalizePath("user://AuthData");
+                string sessionFile = System.IO.Path.Combine(globalDir, "saved_session.txt");
+                if (System.IO.File.Exists(sessionFile))
+                {
+                    System.IO.File.Delete(sessionFile);
+                }
+            }
+            catch
+            {
+                // Ignorar
             }
         }
 
@@ -899,7 +1001,9 @@ namespace FractalTicTacToe.GodotClient
                 if (!_onlineClient.IsConnected)
                 {
                     string user = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
-                    string pass = _authPasswordInput?.Text ?? string.Empty;
+                    string pass = !string.IsNullOrEmpty(_authenticatedPassword)
+                        ? _authenticatedPassword
+                        : (_authPasswordInput?.Text ?? string.Empty);
                     await _onlineClient.ConnectAndLoginAsync(DefaultServerHost, DefaultServerPort, user, pass);
                 }
 
@@ -1000,8 +1104,10 @@ namespace FractalTicTacToe.GodotClient
             _rightPlayerCard.AddChild(rightBox);
             profilesRow.AddChild(_rightPlayerCard);
 
-            // 2. Banner de Confirmación de Takeback del Rival
+            // 2. Banners Interactivos de Confirmación (Takeback, Revancha y Expiración de 30s)
             BuildTakebackConsentBanner(mainColumn);
+            BuildRematchConsentBanner(mainColumn);
+            BuildAbortedMatchPromptBanner(mainColumn);
 
             // 3. Banner de Estado de Partida
             _statusBannerPanel = CreateStyledPanel(
@@ -1105,6 +1211,86 @@ namespace FractalTicTacToe.GodotClient
 
             _takebackOfferPanel.AddChild(col);
             parent.AddChild(_takebackOfferPanel);
+        }
+
+        private void BuildRematchConsentBanner(VBoxContainer parent)
+        {
+            _rematchOfferPanel = CreateStyledPanel(
+                new Color(0.10f, 0.22f, 0.16f),
+                ActiveMacroBorderColor,
+                borderWidth: 3,
+                cornerRadius: 14,
+                contentMargin: 10);
+            _rematchOfferPanel.Visible = false;
+
+            var col = new VBoxContainer();
+            col.AddThemeConstantOverride("separation", 8);
+
+            _rematchOfferLabel = new Label
+            {
+                Text = "🔄 Tu oponente solicita la REVANCHA. ¿Aceptas jugar otra partida?",
+                HorizontalAlignment = HorizontalAlignment.Center,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart
+            };
+            _rematchOfferLabel.AddThemeFontSizeOverride("font_size", 20);
+            _rematchOfferLabel.AddThemeColorOverride("font_color", ActiveMacroBorderColor);
+            col.AddChild(_rematchOfferLabel);
+
+            var btnRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            btnRow.AddThemeConstantOverride("separation", 12);
+
+            var acceptBtn = CreateActionButton("✓ Aceptar Revancha", () => _onlineClient.RespondToOpponentRematch(true), minHeight: 54);
+            var declineBtn = CreateActionButton("✕ Rechazar", () => _onlineClient.RespondToOpponentRematch(false), minHeight: 54);
+
+            btnRow.AddChild(acceptBtn);
+            btnRow.AddChild(declineBtn);
+            col.AddChild(btnRow);
+
+            _rematchOfferPanel.AddChild(col);
+            parent.AddChild(_rematchOfferPanel);
+        }
+
+        private void BuildAbortedMatchPromptBanner(VBoxContainer parent)
+        {
+            _abortedMatchPromptPanel = CreateStyledPanel(
+                new Color(0.24f, 0.13f, 0.15f),
+                LastMoveHighlightColor,
+                borderWidth: 3,
+                cornerRadius: 14,
+                contentMargin: 12);
+            _abortedMatchPromptPanel.Visible = false;
+
+            var col = new VBoxContainer();
+            col.AddThemeConstantOverride("separation", 10);
+
+            _abortedMatchPromptLabel = new Label
+            {
+                Text = "⏱ Se agotaron los 30s para realizar el primer movimiento y la partida fue cancelada (sin cambio de puntos).\n¿Quieres buscar una nueva partida?",
+                HorizontalAlignment = HorizontalAlignment.Center,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart
+            };
+            _abortedMatchPromptLabel.AddThemeFontSizeOverride("font_size", 20);
+            _abortedMatchPromptLabel.AddThemeColorOverride("font_color", LastMoveHighlightColor);
+            col.AddChild(_abortedMatchPromptLabel);
+
+            var btnRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            btnRow.AddThemeConstantOverride("separation", 12);
+
+            var searchAgainBtn = CreateActionButton("🔍 Buscar Nueva Partida", () =>
+            {
+                _selectedOpponentType = LobbyOpponentType.OnlineMultiplayer;
+                NavigateToScreen(ScreenState.HomeLobby);
+                OnTimeControlCardSelected(_timeControlIndex);
+            }, minHeight: 58);
+
+            var backMenuBtn = CreateActionButton("🏠 Volver al Menú", () => NavigateToScreen(ScreenState.HomeLobby), minHeight: 58);
+
+            btnRow.AddChild(searchAgainBtn);
+            btnRow.AddChild(backMenuBtn);
+            col.AddChild(btnRow);
+
+            _abortedMatchPromptPanel.AddChild(col);
+            parent.AddChild(_abortedMatchPromptPanel);
         }
 
         // =====================================================================
@@ -1466,8 +1652,10 @@ namespace FractalTicTacToe.GodotClient
 
         private void OnLogoutPressed()
         {
+            ClearSavedSessionFromDisk();
             _onlineClient.Disconnect();
             _authenticatedUsername = string.Empty;
+            _authenticatedPassword = string.Empty;
             _authPasswordInput.Text = string.Empty;
             _authFeedbackLabel.Text = "Sesión cerrada correctamente.";
             NavigateToScreen(ScreenState.AuthScreen);
@@ -1684,6 +1872,8 @@ namespace FractalTicTacToe.GodotClient
             }
             else
             {
+                _rematchOfferPanel.Visible = false;
+                _abortedMatchPromptPanel.Visible = false;
                 RefreshLocalArenaUI();
             }
 
@@ -1733,10 +1923,19 @@ namespace FractalTicTacToe.GodotClient
             _leftClockLabel.Visible = true;
             _rightClockLabel.Visible = true;
 
+            bool isAbortedFirstMove = state.IsGameOver && _onlineClient.LastEndReason == MatchEndReason.Aborted;
+            _abortedMatchPromptPanel.Visible = isAbortedFirstMove;
+
+            _rematchOfferPanel.Visible = state.IsGameOver && _onlineClient.HasOpponentOfferedRematch;
+            if (_onlineClient.HasOpponentOfferedRematch)
+            {
+                _rematchOfferLabel.Text = $"🔄 {oppName} [{oppRole}] solicita la REVANCHA. ¿Aceptas jugar otra partida?";
+            }
+
             if (state.IsGameOver)
             {
                 string reasonText = FormatEndReason(_onlineClient.LastEndReason);
-                if (_onlineClient.LastEndReason == MatchEndReason.Aborted)
+                if (isAbortedFirstMove)
                 {
                     _statusBannerLabel.Text = "⚠ PARTIDA CANCELADA (Sin primer movimiento en 30s) • Sin cambio de puntos";
                 }
@@ -1775,6 +1974,8 @@ namespace FractalTicTacToe.GodotClient
             }
 
             bool allowTap = _onlineClient.IsInActiveMatch &&
+                            !state.IsGameOver &&
+                            !isAbortedFirstMove &&
                             state.CurrentPlayer == myRole &&
                             !_onlineClient.IsWaitingForOpponentTakebackResponse;
 
@@ -1783,7 +1984,7 @@ namespace FractalTicTacToe.GodotClient
             // REQUERIMIENTO 9 y 10: Al terminar la partida, ocultar controles en vivo (y deshabilitar Rendirse)
             // y mostrar la barra post-partida (Revancha, Analizar y Volver al Menú)
             _inGameActionsRow.Visible = !state.IsGameOver;
-            _postGameActionsRow.Visible = state.IsGameOver;
+            _postGameActionsRow.Visible = state.IsGameOver && !isAbortedFirstMove;
 
             if (!state.IsGameOver)
             {
@@ -1800,7 +2001,13 @@ namespace FractalTicTacToe.GodotClient
             }
             else
             {
-                if (_onlineClient.HasRequestedRematch)
+                if (_onlineClient.RematchDeclinedByOpponent)
+                {
+                    _rematchButton.Text = "✕ Revancha Rechazada";
+                    _rematchButton.Disabled = true;
+                    _telemetryLabel.Text = $"{oppName} rechazó la solicitud de revancha.";
+                }
+                else if (_onlineClient.HasRequestedRematch)
                 {
                     _rematchButton.Text = "⏳ Esperando Rival...";
                     _rematchButton.Disabled = true;

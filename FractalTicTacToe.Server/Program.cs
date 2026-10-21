@@ -295,7 +295,33 @@ namespace FractalTicTacToe.Server
                         else
                         {
                             BroadcastToRoom(prevRoom, MultiplayerProtocol.BuildRematchOffered(prevRoom, reqRole));
+                            Console.WriteLine($"[REVANCHA SOLICITADA] Sala {prevRoom.RoomId}: Jugador {reqRole} invita a una revancha.");
                         }
+                    }
+                    break;
+
+                case MultiplayerProtocol.CmdRematchRespond:
+                    if (!EnsureAuthenticated(sender)) return;
+                    if (parts.Length < 3) return;
+
+                    OnlineMatchRoom remRespRoom = Matchmaking.GetRoom(parts[1]);
+                    if (remRespRoom == null) return;
+
+                    bool acceptRematch = string.Equals(parts[2], "ACCEPT", StringComparison.OrdinalIgnoreCase);
+                    if (acceptRematch)
+                    {
+                        if (remRespRoom.RegisterRematchVote(sender.PlayerId, out _, out bool bothNowAccepted) && bothNowAccepted)
+                        {
+                            OnlineMatchRoom rematchRoom = Matchmaking.CreateRematchRoom(remRespRoom);
+                            BindRoomEventsAndNotifyStart(rematchRoom);
+                        }
+                    }
+                    else
+                    {
+                        Player declinerRole = remRespRoom.GetPlayerRole(sender.PlayerId);
+                        remRespRoom.ClearRematchVotes();
+                        BroadcastToRoom(remRespRoom, MultiplayerProtocol.BuildRematchDeclined(remRespRoom, declinerRole));
+                        Console.WriteLine($"[REVANCHA RECHAZADA] Sala {remRespRoom.RoomId}: Jugador {declinerRole} rechazó la revancha.");
                     }
                     break;
 
@@ -353,6 +379,16 @@ namespace FractalTicTacToe.Server
                 clientO.ActiveRoomId = room.RoomId;
                 clientO.Send(MultiplayerProtocol.BuildMatchStart(room, Player.O));
             }
+
+            // Vigilante autoritativo de 30 segundos en el servidor para el primer movimiento
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(MatchClock.FirstMoveAbortLimitSeconds + 0.5)).ConfigureAwait(false);
+                if (!room.IsMatchOver && room.State.MoveCount == 0)
+                {
+                    room.AbortByFirstMoveTimeout();
+                }
+            });
 
             room.MoveAccepted += (r, move, role) =>
             {

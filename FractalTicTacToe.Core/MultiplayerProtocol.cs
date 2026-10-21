@@ -20,6 +20,7 @@ namespace FractalTicTacToe.Core
         public const string CmdTimeout = "TIMEOUT";                 // TIMEOUT|<roomId>
         public const string CmdAbort = "ABORT";                     // ABORT|<roomId>
         public const string CmdRematchRequest = "REMATCH_REQ";      // REMATCH_REQ|<roomId>
+        public const string CmdRematchRespond = "REMATCH_RESP";     // REMATCH_RESP|<roomId>|<ACCEPT|DECLINE>
         public const string CmdLeaderboard = "LEADERBOARD";         // LEADERBOARD
         public const string CmdHistory = "HISTORY";                 // HISTORY|<username>
 
@@ -33,6 +34,7 @@ namespace FractalTicTacToe.Core
         public const string EvtTakebackResolved = "TAKEBACK_RESOLVED";// TAKEBACK_RESOLVED|<roomId>|<ACCEPTED|DECLINED>|<fen>|<movesTranscript>
         public const string EvtMatchEnd = "MATCH_END";              // MATCH_END|<roomId>|<winner>|<reason>|<newEloX>|<deltaX>|<newEloO>|<deltaO>|<fen>|<movesTranscript>
         public const string EvtRematchOffered = "REMATCH_OFFERED";  // REMATCH_OFFERED|<roomId>|<requesterRole>
+        public const string EvtRematchDeclined = "REMATCH_DECLINED";// REMATCH_DECLINED|<roomId>|<declinerRole>
         public const string EvtError = "ERROR";                     // ERROR|<message>
 
         public static string BuildRegister(string username, string password) =>
@@ -61,6 +63,8 @@ namespace FractalTicTacToe.Core
         public static string BuildTimeout(string roomId) => $"{CmdTimeout}|{roomId}";
         public static string BuildAbort(string roomId) => $"{CmdAbort}|{roomId}";
         public static string BuildRematchRequest(string roomId) => $"{CmdRematchRequest}|{roomId}";
+        public static string BuildRematchResponse(string roomId, bool accept) =>
+            $"{CmdRematchRespond}|{roomId}|{(accept ? "ACCEPT" : "DECLINE")}";
 
         public static string BuildAuthOk(PlayerProfile profile) =>
             $"{EvtAuthOk}|{profile.PlayerId}|{profile.Username}|{profile.EloRating}|{profile.RankTitle}|" +
@@ -88,6 +92,9 @@ namespace FractalTicTacToe.Core
 
         public static string BuildRematchOffered(OnlineMatchRoom room, Player requesterRole) =>
             $"{EvtRematchOffered}|{room.RoomId}|{requesterRole}";
+
+        public static string BuildRematchDeclined(OnlineMatchRoom room, Player declinerRole) =>
+            $"{EvtRematchDeclined}|{room.RoomId}|{declinerRole}";
 
         public static string BuildError(string message) => $"{EvtError}|{Sanitize(message)}";
 

@@ -540,6 +540,32 @@ namespace CoreTests
                 Assert(clientX.State.IsGameOver && clientX.State.Winner == Player.X, "Cliente X debe ver la partida terminada y a X como ganador por tiempo.");
                 Assert(!clientX.IsInActiveMatch && !clientO.IsInActiveMatch, "IsInActiveMatch debe ser false al terminar para deshabilitar Rendirse.");
                 Assert(clientX.LastRatingUpdate.HasValue && clientX.LastRatingUpdate.Value.DeltaX > 0, "Cliente X debe recibir el delta positivo de puntos (+pts).");
+
+                // Verificar flujo de Revancha: X solicita revancha -> O recibe notificación -> O rechaza
+                room.RegisterRematchVote(room.PlayerX.PlayerId, out _, out bool bothReady);
+                Assert(!bothReady, "Con un solo voto aún no inicia la revancha.");
+                string rematchOfferPkt = MultiplayerProtocol.BuildRematchOffered(room, Player.X);
+                clientX.ProcessServerPacket(rematchOfferPkt);
+                clientO.ProcessServerPacket(rematchOfferPkt);
+                Assert(clientX.HasRequestedRematch && !clientX.HasOpponentOfferedRematch, "Cliente X sabe que solicitó revancha.");
+                Assert(clientO.HasOpponentOfferedRematch && !clientO.HasRequestedRematch, "Cliente O recibe la notificación de aceptar/rechazar revancha.");
+
+                room.ClearRematchVotes();
+                string rematchDeclinedPkt = MultiplayerProtocol.BuildRematchDeclined(room, Player.O);
+                clientX.ProcessServerPacket(rematchDeclinedPkt);
+                clientO.ProcessServerPacket(rematchDeclinedPkt);
+                Assert(!clientO.HasOpponentOfferedRematch && clientX.RematchDeclinedByOpponent, "Tras rechazar O, se limpia la oferta y X ve que fue rechazada.");
+
+                // Verificar que si expiran los 30s para el primer movimiento, se bloquea el tablero de inmediato
+                matchmaking.EnqueueOrMatchPlayer(alice.PlayerId, TimeControlConfig.Bullet1Plus1);
+                Assert(matchmaking.EnqueueOrMatchPlayer(bob.PlayerId, TimeControlConfig.Blitz3Plus0) == null, "1+1 y 3+0 JAMÁS deben emparejarse entre sí.");
+                OnlineMatchRoom roomBullet = matchmaking.EnqueueOrMatchPlayer(bob.PlayerId, TimeControlConfig.Bullet1Plus1);
+                Assert(roomBullet != null && roomBullet.TimeControl.ToCode() == "1+1", "Al buscar ambos en 1+1 sí se emparejan.");
+
+                clientX.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(roomBullet, Player.X));
+                clientX.TickClock(30.5);
+                Assert(clientX.State.IsGameOver && clientX.LastEndReason == MatchEndReason.Aborted, "Al expirar los 30s sin primer tiro, el cliente concluye y bloquea el tablero de inmediato.");
+                Assert(!clientX.TrySendMove(4, 4), "No debe permitir hacer el primer movimiento después de expirar los 30s.");
             }
         }
 

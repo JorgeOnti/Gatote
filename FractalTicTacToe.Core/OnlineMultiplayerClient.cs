@@ -52,6 +52,11 @@ namespace FractalTicTacToe.Core
 
         public bool HasRequestedRematch { get; private set; }
         public bool HasOpponentOfferedRematch { get; private set; }
+        public bool RematchDeclinedByOpponent { get; private set; }
+
+        private bool _pendingQueueAfterAuth;
+        private TimeControlConfig _pendingQueueTimeControl = TimeControlConfig.Blitz3Plus2;
+        private int _pendingQueueMaxEloGap = 400;
 
         // Eventos para actualizar la UI de Godot 4
         public event Action StateChanged;
@@ -131,7 +136,21 @@ namespace FractalTicTacToe.Core
             Clock.Reset(timeControl);
             HasRequestedRematch = false;
             HasOpponentOfferedRematch = false;
+            RematchDeclinedByOpponent = false;
+            IsInQueue = true;
+
+            if (!IsAuthenticated)
+            {
+                _pendingQueueAfterAuth = true;
+                _pendingQueueTimeControl = timeControl;
+                _pendingQueueMaxEloGap = maxEloGap;
+                StateChanged?.Invoke();
+                return;
+            }
+
+            _pendingQueueAfterAuth = false;
             SendRawLine(MultiplayerProtocol.BuildQueue(maxEloGap, timeControl.ToCode()));
+            StateChanged?.Invoke();
         }
 
         /// <summary>
@@ -139,6 +158,7 @@ namespace FractalTicTacToe.Core
         /// </summary>
         public void CancelMatchmakingQueue()
         {
+            _pendingQueueAfterAuth = false;
             IsInQueue = false;
             if (IsConnected)
             {
@@ -157,8 +177,29 @@ namespace FractalTicTacToe.Core
                 return false;
             }
 
+            RematchDeclinedByOpponent = false;
             HasRequestedRematch = true;
             SendRawLine(MultiplayerProtocol.BuildRematchRequest(ActiveRoomId));
+            StateChanged?.Invoke();
+            return true;
+        }
+
+        /// <summary>
+        /// Envía nuestra respuesta explícita (Aceptar o Rechazar) a la invitación de revancha del oponente.
+        /// </summary>
+        public bool RespondToOpponentRematch(bool accept)
+        {
+            if (!IsConnected || string.IsNullOrEmpty(ActiveRoomId) || !HasOpponentOfferedRematch)
+            {
+                return false;
+            }
+
+            HasOpponentOfferedRematch = false;
+            if (accept)
+            {
+                HasRequestedRematch = true;
+            }
+            SendRawLine(MultiplayerProtocol.BuildRematchResponse(ActiveRoomId, accept));
             StateChanged?.Invoke();
             return true;
         }
@@ -168,7 +209,7 @@ namespace FractalTicTacToe.Core
         /// </summary>
         public bool TrySendMove(int boardIndex, int cellIndex)
         {
-            if (!IsConnected || string.IsNullOrEmpty(ActiveRoomId) || State.IsGameOver)
+            if (!IsConnected || string.IsNullOrEmpty(ActiveRoomId) || State.IsGameOver || Clock.IsAbortedByFirstMoveTimeout)
             {
                 return false;
             }
@@ -254,7 +295,12 @@ namespace FractalTicTacToe.Core
             {
                 if (Clock.IsAbortedByFirstMoveTimeout)
                 {
+                    // Bloquear inmediatamente el tablero local al vencer los 30s sin primer movimiento
+                    State.ForceConclude(Player.None);
+                    LastEndReason = MatchEndReason.Aborted;
+                    Clock.Pause();
                     SendRawLine(MultiplayerProtocol.BuildAbort(ActiveRoomId));
+                    StateChanged?.Invoke();
                 }
                 else if (Clock.FlaggedPlayer == AssignedRole)
                 {
@@ -372,6 +418,13 @@ namespace FractalTicTacToe.Core
                             if (int.TryParse(parts[7], out int d)) LocalDraws = d;
                         }
                         Authenticated?.Invoke(LocalUsername, LocalElo, LocalRankTitle);
+
+                        if (_pendingQueueAfterAuth)
+                        {
+                            _pendingQueueAfterAuth = false;
+                            SendRawLine(MultiplayerProtocol.BuildQueue(_pendingQueueMaxEloGap, _pendingQueueTimeControl.ToCode()));
+                        }
+
                         StateChanged?.Invoke();
                     }
                     break;
@@ -398,6 +451,7 @@ namespace FractalTicTacToe.Core
                         IsWaitingForOpponentTakebackResponse = false;
                         HasRequestedRematch = false;
                         HasOpponentOfferedRematch = false;
+                        RematchDeclinedByOpponent = false;
                         LastNetworkMove = null;
                         LastRatingUpdate = null;
                         LastEndReason = MatchEndReason.InProgress;
@@ -600,9 +654,23 @@ namespace FractalTicTacToe.Core
                         if (remRole != AssignedRole)
                         {
                             HasOpponentOfferedRematch = true;
-                            StateChanged?.Invoke();
+                            RematchDeclinedByOpponent = false;
                         }
+                        else
+                        {
+                            HasRequestedRematch = true;
+                            RematchDeclinedByOpponent = false;
+                        }
+                        StateChanged?.Invoke();
                     }
+                    break;
+
+                case MultiplayerProtocol.EvtRematchDeclined:
+                    // REMATCH_DECLINED|<roomId>|<declinerRole>
+                    HasRequestedRematch = false;
+                    HasOpponentOfferedRematch = false;
+                    RematchDeclinedByOpponent = true;
+                    StateChanged?.Invoke();
                     break;
 
                 case "LEADERBOARD":

@@ -377,6 +377,15 @@ namespace FractalTicTacToe.Core
             return true;
         }
 
+        /// <summary>
+        /// Limpia las solicitudes de revancha cuando uno de los jugadores rechaza la invitación.
+        /// </summary>
+        public void ClearRematchVotes()
+        {
+            _rematchRequestedByX = false;
+            _rematchRequestedByO = false;
+        }
+
         private void FinalizeMatch(Player winner, MatchEndReason reason)
         {
             PendingTakeback = null;
