@@ -28,7 +28,15 @@ namespace FractalTicTacToe.Server
         public static async Task Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
-            int port = args.Length > 0 && int.TryParse(args[0], out int p) ? p : DefaultPort;
+            int port = DefaultPort;
+            if (args.Length > 0 && int.TryParse(args[0], out int cliPort))
+            {
+                port = cliPort;
+            }
+            else if (int.TryParse(Environment.GetEnvironmentVariable("PORT"), out int envPort))
+            {
+                port = envPort;
+            }
 
             Matchmaking.LoadFromDirectory(DataDirectory);
 
@@ -345,6 +353,24 @@ namespace FractalTicTacToe.Server
                         sbHist.Append('|').Append($"{rec.MatchId}:{rec.PlayerXName}({rec.PlayerXEloAfter})vs{rec.PlayerOName}({rec.PlayerOEloAfter}):W={rec.Winner}");
                     }
                     sender.Send(sbHist.ToString());
+                    break;
+
+                case MultiplayerProtocol.CmdDeleteAccount:
+                    if (!EnsureAuthenticated(sender)) return;
+                    string delPass = parts.Length >= 2 ? parts[1] : string.Empty;
+                    string deletedUsername = sender.Username;
+                    if (!Matchmaking.DeleteAccount(deletedUsername, delPass, out string delErr))
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError(delErr));
+                        return;
+                    }
+
+                    ConnectedClientsByPlayerId.TryRemove(sender.PlayerId, out _);
+                    sender.PlayerId = null;
+                    sender.Username = null;
+                    Matchmaking.SaveToDirectory(DataDirectory);
+                    sender.Send(MultiplayerProtocol.BuildAccountDeleted(deletedUsername));
+                    Console.WriteLine($"[CUENTA ELIMINADA] Usuario '{deletedUsername}' eliminó permanentemente su cuenta.");
                     break;
 
                 default:

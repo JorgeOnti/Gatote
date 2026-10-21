@@ -21,6 +21,7 @@ namespace FractalTicTacToe.GodotClient
 
         private enum ScreenState
         {
+            SplashLoading = -1,
             AuthScreen = 0,
             HomeLobby = 1,
             PlayArena = 2,
@@ -35,7 +36,7 @@ namespace FractalTicTacToe.GodotClient
             LocalPassAndPlay = 2
         }
 
-        private ScreenState _currentScreen = ScreenState.AuthScreen;
+        private ScreenState _currentScreen = ScreenState.SplashLoading;
         private LobbyOpponentType _selectedOpponentType = LobbyOpponentType.BotMinimax;
         private BotDifficulty _selectedBotDifficulty = BotDifficulty.Hard;
         private int _timeControlIndex = 2; // Blitz 3+2 por defecto
@@ -48,18 +49,37 @@ namespace FractalTicTacToe.GodotClient
         private string _authenticatedPassword = string.Empty;
         private double _queueElapsedSeconds;
 
+        // Pantalla Splash de Carga Inicial con Logo y Barra de Progreso
+        private Control _splashScreenContainer;
+        private ProgressBar _splashProgressBar;
+        private Label _splashPercentLabel;
+        private Label _splashStatusLabel;
+        private double _splashProgress;
+        private bool _splashCompleted;
+
+        // Audio Procedural Sintetizado (PCM 16-bit en memoria)
+        private AudioStreamPlayer _sfxPlayer;
+        private Button _soundToggleBtn;
+        private bool _isMuted;
+        private bool _lowTimeBeepPlayed;
+
         // Historial de partidas jugadas por el usuario (la posición 0 es SIEMPRE la última partida jugada)
         private readonly List<MatchRecord> _recordedMatches = new List<MatchRecord>();
         private MatchReplayNavigator _replayNavigator;
         private string _lastRecordedMatchId;
 
         // Contenedores raíz
+        private PanelContainer _topHeaderPanel;
         private Control _authScreenContainer;
         private Control _homeScreenContainer;
         private Control _playScreenContainer;
         private Control _analysisScreenContainer;
         private Control _profileScreenContainer;
         private PanelContainer _bottomNavPanel;
+
+        // Modales de cumplimiento de tiendas (Privacidad y Eliminación de Cuenta)
+        private PanelContainer _deleteAccountConfirmPanel;
+        private PanelContainer _privacyPolicyModalPanel;
 
         // Botones de la barra de navegación inferior (SOLO 3: Inicio, Análisis, Perfil)
         private Button _navHomeBtn;
@@ -191,6 +211,9 @@ namespace FractalTicTacToe.GodotClient
 
         public override void _Ready()
         {
+            _sfxPlayer = new AudioStreamPlayer();
+            AddChild(_sfxPlayer);
+
             LoadLocalAccountsFromDisk();
 
             _localSession = new GameSessionController(
@@ -202,6 +225,7 @@ namespace FractalTicTacToe.GodotClient
             _onlineClient = new OnlineMultiplayerClient();
             _onlineClient.StateChanged += OnAnySessionStateChanged;
             _onlineClient.Authenticated += OnOnlineAuthenticated;
+            _onlineClient.AccountDeleted += OnOnlineAccountDeleted;
             _onlineClient.MatchStarted += OnOnlineMatchStarted;
             _onlineClient.MatchEnded += OnOnlineMatchEnded;
             _onlineClient.ErrorReceived += OnOnlineErrorReceived;
@@ -209,21 +233,10 @@ namespace FractalTicTacToe.GodotClient
 
             BuildMultiScreenMobileApp();
 
-            // Si el usuario ya inició sesión una vez, entrar directamente a Inicio sin pedir login de nuevo
-            if (TryLoadSavedSession(out string savedUser, out string savedPass))
-            {
-                _authenticatedUsername = savedUser;
-                _authenticatedPassword = savedPass;
-                _localSession.ProfileX.Username = savedUser;
-                NavigateToScreen(ScreenState.HomeLobby);
-                _ = AuthenticateSavedSessionInBackgroundAsync(savedUser, savedPass);
-            }
-            else
-            {
-                // Solo para usuarios nuevos (o tras cerrar sesión explícitamente)
-                NavigateToScreen(ScreenState.AuthScreen);
-            }
-
+            // Mostrar primero la pantalla Splash con el Logo Oficial y la Barra de Loading (0% -> 100%)
+            _splashProgress = 0.0;
+            _splashCompleted = false;
+            NavigateToScreen(ScreenState.SplashLoading);
             RefreshUI();
         }
 
@@ -238,6 +251,7 @@ namespace FractalTicTacToe.GodotClient
             {
                 _onlineClient.StateChanged -= OnAnySessionStateChanged;
                 _onlineClient.Authenticated -= OnOnlineAuthenticated;
+                _onlineClient.AccountDeleted -= OnOnlineAccountDeleted;
                 _onlineClient.MatchStarted -= OnOnlineMatchStarted;
                 _onlineClient.MatchEnded -= OnOnlineMatchEnded;
                 _onlineClient.ErrorReceived -= OnOnlineErrorReceived;
@@ -249,6 +263,38 @@ namespace FractalTicTacToe.GodotClient
         public override void _Process(double delta)
         {
             _pulseTime += delta;
+
+            if (_currentScreen == ScreenState.SplashLoading && !_splashCompleted)
+            {
+                _splashProgress = Math.Min(1.0, _splashProgress + delta / 1.35);
+                int pct = (int)Math.Round(_splashProgress * 100.0);
+                if (_splashProgressBar != null)
+                {
+                    _splashProgressBar.Value = pct;
+                }
+                if (_splashPercentLabel != null)
+                {
+                    _splashPercentLabel.Text = $"{pct}%";
+                }
+                if (_splashStatusLabel != null)
+                {
+                    if (_splashProgress < 0.35)
+                        _splashStatusLabel.Text = "Cargando motor táctico Minimax + Zobrist...";
+                    else if (_splashProgress < 0.72)
+                        _splashStatusLabel.Text = "Inicializando tableros fractales y audio...";
+                    else if (_splashProgress < 0.99)
+                        _splashStatusLabel.Text = "Verificando sesión guardada en el dispositivo...";
+                    else
+                        _splashStatusLabel.Text = "¡Listo!";
+                }
+
+                if (_splashProgress >= 1.0)
+                {
+                    _splashCompleted = true;
+                    CompleteInitialSplashTransition();
+                }
+                return;
+            }
 
             if (_onlineClient.IsInQueue)
             {
@@ -275,6 +321,52 @@ namespace FractalTicTacToe.GodotClient
             if (_currentScreen == ScreenState.PlayArena)
             {
                 UpdateClockLabelsAndPulseGlow();
+            }
+        }
+
+        private void CompleteInitialSplashTransition()
+        {
+            PlaySynthesizedSound(GameSoundEffect.MoveTap);
+
+            // Si el usuario ya inició sesión una vez, entrar directamente a Inicio sin pedir login de nuevo
+            if (TryLoadSavedSession(out string savedUser, out string savedPass))
+            {
+                _authenticatedUsername = savedUser;
+                _authenticatedPassword = savedPass;
+                _localSession.ProfileX.Username = savedUser;
+                NavigateToScreen(ScreenState.HomeLobby);
+                _ = AuthenticateSavedSessionInBackgroundAsync(savedUser, savedPass);
+            }
+            else
+            {
+                // Solo para usuarios nuevos (o tras cerrar sesión explícitamente)
+                NavigateToScreen(ScreenState.AuthScreen);
+            }
+        }
+
+        private void PlaySynthesizedSound(GameSoundEffect effectType)
+        {
+            if (_isMuted || _sfxPlayer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                byte[] pcmBytes = SoundEffectsSynthesizer.GeneratePcm16Bytes(effectType);
+                var wavStream = new AudioStreamWav
+                {
+                    Format = AudioStreamWav.FormatEnum.Format16Bits,
+                    MixRate = SoundEffectsSynthesizer.SampleRate,
+                    Stereo = false,
+                    Data = pcmBytes
+                };
+                _sfxPlayer.Stream = wavStream;
+                _sfxPlayer.Play();
+            }
+            catch
+            {
+                // Ignorar si el dispositivo de audio no está disponible
             }
         }
 
@@ -315,25 +407,161 @@ namespace FractalTicTacToe.GodotClient
             };
             rootColumn.AddChild(screenHost);
 
+            _splashScreenContainer = BuildSplashLoadingScreen();
             _authScreenContainer = BuildAuthScreen();
             _homeScreenContainer = BuildHomeLobbyScreen();
             _playScreenContainer = BuildPlayArenaScreen();
             _analysisScreenContainer = BuildAnalysisStudioScreen();
             _profileScreenContainer = BuildProfileAndLeaguesScreen();
 
+            screenHost.AddChild(_splashScreenContainer);
             screenHost.AddChild(_authScreenContainer);
             screenHost.AddChild(_homeScreenContainer);
             screenHost.AddChild(_playScreenContainer);
             screenHost.AddChild(_analysisScreenContainer);
             screenHost.AddChild(_profileScreenContainer);
 
+            // Modales superpuestos (Política de Privacidad y Confirmación de Eliminación de Cuenta)
+            _privacyPolicyModalPanel = BuildPrivacyPolicyModal();
+            screenHost.AddChild(_privacyPolicyModalPanel);
+
             // 3. Barra de Navegación Inferior (SOLO 3 Pestañas: Inicio, Análisis, Perfil)
             BuildBottomNavigationBar(rootColumn);
         }
 
+        private Control BuildSplashLoadingScreen()
+        {
+            var centerCol = new VBoxContainer();
+            centerCol.SetAnchorsPreset(LayoutPreset.FullRect);
+            centerCol.Alignment = BoxContainer.AlignmentMode.Center;
+            centerCol.AddThemeConstantOverride("separation", 24);
+
+            var splashCard = CreateStyledPanel(CardBgColor, ActiveMacroBorderColor, borderWidth: 3, cornerRadius: 24, contentMargin: 28);
+            var innerCol = new VBoxContainer();
+            innerCol.AddThemeConstantOverride("separation", 18);
+
+            // Logo Oficial del Juego
+            Texture2D logoTex = ResourceLoader.Exists("res://Assets/gatote_logo.png")
+                ? ResourceLoader.Load<Texture2D>("res://Assets/gatote_logo.png")
+                : null;
+
+            if (logoTex != null)
+            {
+                var logoRect = new TextureRect
+                {
+                    Texture = logoTex,
+                    ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                    StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                    CustomMinimumSize = new Vector2(0, 340),
+                    SizeFlagsHorizontal = SizeFlags.ExpandFill
+                };
+                innerCol.AddChild(logoRect);
+            }
+
+            var brandHeader = new Label
+            {
+                Text = "⚡ GATOTE FRACTAL • MUERTE SÚBITA",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            brandHeader.AddThemeFontSizeOverride("font_size", 28);
+            brandHeader.AddThemeColorOverride("font_color", ActiveMacroBorderColor);
+            innerCol.AddChild(brandHeader);
+
+            _splashProgressBar = new ProgressBar
+            {
+                MinValue = 0,
+                MaxValue = 100,
+                Value = 0,
+                ShowPercentage = false,
+                CustomMinimumSize = new Vector2(0, 26),
+                SizeFlagsHorizontal = SizeFlags.ExpandFill
+            };
+            var barBg = new StyleBoxFlat
+            {
+                BgColor = SurfaceColor,
+                CornerRadiusTopLeft = 12,
+                CornerRadiusTopRight = 12,
+                CornerRadiusBottomLeft = 12,
+                CornerRadiusBottomRight = 12
+            };
+            var barFill = new StyleBoxFlat
+            {
+                BgColor = ActiveMacroBorderColor,
+                CornerRadiusTopLeft = 12,
+                CornerRadiusTopRight = 12,
+                CornerRadiusBottomLeft = 12,
+                CornerRadiusBottomRight = 12
+            };
+            _splashProgressBar.AddThemeStyleboxOverride("background", barBg);
+            _splashProgressBar.AddThemeStyleboxOverride("fill", barFill);
+            innerCol.AddChild(_splashProgressBar);
+
+            _splashPercentLabel = new Label
+            {
+                Text = "0%",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            _splashPercentLabel.AddThemeFontSizeOverride("font_size", 24);
+            _splashPercentLabel.AddThemeColorOverride("font_color", LastMoveHighlightColor);
+            innerCol.AddChild(_splashPercentLabel);
+
+            _splashStatusLabel = new Label
+            {
+                Text = "Cargando motor táctico Minimax + Zobrist...",
+                HorizontalAlignment = HorizontalAlignment.Center,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart
+            };
+            _splashStatusLabel.AddThemeFontSizeOverride("font_size", 19);
+            _splashStatusLabel.AddThemeColorOverride("font_color", new Color(0.75f, 0.82f, 0.92f));
+            innerCol.AddChild(_splashStatusLabel);
+
+            splashCard.AddChild(innerCol);
+            centerCol.AddChild(splashCard);
+            return centerCol;
+        }
+
+        private PanelContainer BuildPrivacyPolicyModal()
+        {
+            var modal = CreateStyledPanel(
+                new Color(0.07f, 0.10f, 0.16f, 0.98f),
+                AccentPrimaryColor,
+                borderWidth: 3,
+                cornerRadius: 20,
+                contentMargin: 24);
+            modal.SetAnchorsPreset(LayoutPreset.FullRect);
+            modal.Visible = false;
+
+            var col = new VBoxContainer { SizeFlagsVertical = SizeFlags.ExpandFill };
+            col.AddThemeConstantOverride("separation", 16);
+
+            var title = new Label
+            {
+                Text = "🔒 POLÍTICA DE PRIVACIDAD Y DATOS",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            title.AddThemeFontSizeOverride("font_size", 26);
+            title.AddThemeColorOverride("font_color", ActiveMacroBorderColor);
+            col.AddChild(title);
+
+            var bodyLbl = new Label
+            {
+                Text = SoundEffectsSynthesizer.PrivacyPolicyInAppText,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart,
+                SizeFlagsVertical = SizeFlags.ExpandFill
+            };
+            bodyLbl.AddThemeFontSizeOverride("font_size", 20);
+            col.AddChild(bodyLbl);
+
+            var closeBtn = CreateActionButton("✓ Entendido y Cerrar", () => modal.Visible = false, minHeight: 62);
+            col.AddChild(closeBtn);
+
+            modal.AddChild(col);
+            return modal;
+        }
+
         private void BuildTopAppHeader(VBoxContainer parent)
         {
-            var headerPanel = CreateStyledPanel(SurfaceColor, InactiveMacroBorderColor, borderWidth: 2, cornerRadius: 14, contentMargin: 12);
+            _topHeaderPanel = CreateStyledPanel(SurfaceColor, InactiveMacroBorderColor, borderWidth: 2, cornerRadius: 14, contentMargin: 12);
             var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
             row.AddThemeConstantOverride("separation", 12);
 
@@ -353,10 +581,28 @@ namespace FractalTicTacToe.GodotClient
             _topHeaderSubtitleLabel.AddThemeFontSizeOverride("font_size", 20);
             _topHeaderSubtitleLabel.AddThemeColorOverride("font_color", ActiveMacroBorderColor);
 
+            _soundToggleBtn = CreateActionButton("🔊", OnToggleMutePressed, minHeight: 46);
+            _soundToggleBtn.CustomMinimumSize = new Vector2(64, 46);
+            _soundToggleBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
+
             row.AddChild(brandTitle);
             row.AddChild(_topHeaderSubtitleLabel);
-            headerPanel.AddChild(row);
-            parent.AddChild(headerPanel);
+            row.AddChild(_soundToggleBtn);
+            _topHeaderPanel.AddChild(row);
+            parent.AddChild(_topHeaderPanel);
+        }
+
+        private void OnToggleMutePressed()
+        {
+            _isMuted = !_isMuted;
+            if (_soundToggleBtn != null)
+            {
+                _soundToggleBtn.Text = _isMuted ? "🔇" : "🔊";
+            }
+            if (!_isMuted)
+            {
+                PlaySynthesizedSound(GameSoundEffect.MoveTap);
+            }
         }
 
         private void BuildBottomNavigationBar(VBoxContainer parent)
@@ -388,6 +634,15 @@ namespace FractalTicTacToe.GodotClient
             }
 
             _currentScreen = targetScreen;
+
+            if (_topHeaderPanel != null)
+            {
+                _topHeaderPanel.Visible = targetScreen != ScreenState.SplashLoading;
+            }
+            if (_splashScreenContainer != null)
+            {
+                _splashScreenContainer.Visible = targetScreen == ScreenState.SplashLoading;
+            }
 
             _authScreenContainer.Visible = targetScreen == ScreenState.AuthScreen;
             _homeScreenContainer.Visible = targetScreen == ScreenState.HomeLobby;
@@ -436,18 +691,34 @@ namespace FractalTicTacToe.GodotClient
             var centerCol = new VBoxContainer();
             centerCol.SetAnchorsPreset(LayoutPreset.FullRect);
             centerCol.Alignment = BoxContainer.AlignmentMode.Center;
-            centerCol.AddThemeConstantOverride("separation", 20);
+            centerCol.AddThemeConstantOverride("separation", 18);
 
-            var card = CreateStyledPanel(CardBgColor, AccentPrimaryColor, borderWidth: 3, cornerRadius: 20, contentMargin: 24);
+            var card = CreateStyledPanel(CardBgColor, AccentPrimaryColor, borderWidth: 3, cornerRadius: 20, contentMargin: 22);
             var formCol = new VBoxContainer();
-            formCol.AddThemeConstantOverride("separation", 16);
+            formCol.AddThemeConstantOverride("separation", 14);
+
+            Texture2D logoTex = ResourceLoader.Exists("res://Assets/gatote_logo.png")
+                ? ResourceLoader.Load<Texture2D>("res://Assets/gatote_logo.png")
+                : null;
+            if (logoTex != null)
+            {
+                var authLogo = new TextureRect
+                {
+                    Texture = logoTex,
+                    ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                    StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+                    CustomMinimumSize = new Vector2(0, 170),
+                    SizeFlagsHorizontal = SizeFlags.ExpandFill
+                };
+                formCol.AddChild(authLogo);
+            }
 
             var title = new Label
             {
                 Text = "🔐 ACCESO DE JUGADOR",
                 HorizontalAlignment = HorizontalAlignment.Center
             };
-            title.AddThemeFontSizeOverride("font_size", 30);
+            title.AddThemeFontSizeOverride("font_size", 28);
 
             var subtitle = new Label
             {
@@ -455,23 +726,23 @@ namespace FractalTicTacToe.GodotClient
                 HorizontalAlignment = HorizontalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
-            subtitle.AddThemeFontSizeOverride("font_size", 19);
+            subtitle.AddThemeFontSizeOverride("font_size", 18);
             subtitle.AddThemeColorOverride("font_color", new Color(0.75f, 0.82f, 0.92f));
 
             _authUsernameInput = new LineEdit
             {
                 PlaceholderText = "Nombre de usuario (mín. 3 caracteres)",
-                CustomMinimumSize = new Vector2(0, 62)
+                CustomMinimumSize = new Vector2(0, 58)
             };
-            _authUsernameInput.AddThemeFontSizeOverride("font_size", 22);
+            _authUsernameInput.AddThemeFontSizeOverride("font_size", 21);
 
             _authPasswordInput = new LineEdit
             {
                 PlaceholderText = "Contraseña (mín. 4 caracteres)",
                 Secret = true,
-                CustomMinimumSize = new Vector2(0, 62)
+                CustomMinimumSize = new Vector2(0, 58)
             };
-            _authPasswordInput.AddThemeFontSizeOverride("font_size", 22);
+            _authPasswordInput.AddThemeFontSizeOverride("font_size", 21);
 
             _authFeedbackLabel = new Label
             {
@@ -479,17 +750,26 @@ namespace FractalTicTacToe.GodotClient
                 HorizontalAlignment = HorizontalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
-            _authFeedbackLabel.AddThemeFontSizeOverride("font_size", 19);
+            _authFeedbackLabel.AddThemeFontSizeOverride("font_size", 18);
             _authFeedbackLabel.AddThemeColorOverride("font_color", LastMoveHighlightColor);
 
             var btnRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-            btnRow.AddThemeConstantOverride("separation", 14);
+            btnRow.AddThemeConstantOverride("separation", 12);
 
-            _loginBtn = CreateActionButton("🔑 Iniciar Sesión", () => OnSubmitAuthPressed(isRegister: false), minHeight: 68);
-            _registerBtn = CreateActionButton("📝 Registrarse", () => OnSubmitAuthPressed(isRegister: true), minHeight: 68);
+            _loginBtn = CreateActionButton("🔑 Iniciar Sesión", () => OnSubmitAuthPressed(isRegister: false), minHeight: 62);
+            _registerBtn = CreateActionButton("📝 Registrarse", () => OnSubmitAuthPressed(isRegister: true), minHeight: 62);
 
             btnRow.AddChild(_loginBtn);
             btnRow.AddChild(_registerBtn);
+
+            var secondaryRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            secondaryRow.AddThemeConstantOverride("separation", 12);
+
+            var guestBtn = CreateActionButton("👤 Jugar como Invitado", OnGuestLoginPressed, minHeight: 54);
+            var privacyBtn = CreateActionButton("🔒 Privacidad", () => _privacyPolicyModalPanel.Visible = true, minHeight: 54);
+
+            secondaryRow.AddChild(guestBtn);
+            secondaryRow.AddChild(privacyBtn);
 
             formCol.AddChild(title);
             formCol.AddChild(subtitle);
@@ -497,10 +777,19 @@ namespace FractalTicTacToe.GodotClient
             formCol.AddChild(_authPasswordInput);
             formCol.AddChild(_authFeedbackLabel);
             formCol.AddChild(btnRow);
+            formCol.AddChild(secondaryRow);
             card.AddChild(formCol);
             centerCol.AddChild(card);
 
             return centerCol;
+        }
+
+        private void OnGuestLoginPressed()
+        {
+            _authenticatedUsername = "Invitado";
+            _authenticatedPassword = string.Empty;
+            _localSession.ProfileX.Username = "Invitado";
+            NavigateToScreen(ScreenState.HomeLobby);
         }
 
         private async void OnSubmitAuthPressed(bool isRegister)
@@ -1538,25 +1827,31 @@ namespace FractalTicTacToe.GodotClient
         {
             var col = new VBoxContainer();
             col.SetAnchorsPreset(LayoutPreset.FullRect);
-            col.AddThemeConstantOverride("separation", 12);
+            col.AddThemeConstantOverride("separation", 10);
 
             var profileCard = CreateStyledPanel(CardBgColor, ActiveMacroBorderColor, borderWidth: 3, cornerRadius: 18, contentMargin: 16);
             var profileCol = new VBoxContainer();
-            profileCol.AddThemeConstantOverride("separation", 6);
+            profileCol.AddThemeConstantOverride("separation", 8);
 
             var headerRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            headerRow.AddThemeConstantOverride("separation", 8);
             _profileNameLabel = new Label
             {
                 Text = "Jugador (Tú)",
                 SizeFlagsHorizontal = SizeFlags.ExpandFill
             };
-            _profileNameLabel.AddThemeFontSizeOverride("font_size", 26);
+            _profileNameLabel.AddThemeFontSizeOverride("font_size", 24);
 
-            var logoutBtn = CreateActionButton("🚪 Cerrar Sesión", OnLogoutPressed, minHeight: 48);
-            logoutBtn.CustomMinimumSize = new Vector2(190, 48);
+            var privacyBtn = CreateActionButton("🔒 Privacidad", () => _privacyPolicyModalPanel.Visible = true, minHeight: 46);
+            privacyBtn.CustomMinimumSize = new Vector2(150, 46);
+            privacyBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
+
+            var logoutBtn = CreateActionButton("🚪 Salir", OnLogoutPressed, minHeight: 46);
+            logoutBtn.CustomMinimumSize = new Vector2(130, 46);
             logoutBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
 
             headerRow.AddChild(_profileNameLabel);
+            headerRow.AddChild(privacyBtn);
             headerRow.AddChild(logoutBtn);
 
             _profileRatingBigLabel = new Label
@@ -1573,11 +1868,47 @@ namespace FractalTicTacToe.GodotClient
                 HorizontalAlignment = HorizontalAlignment.Center,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart
             };
-            _profileStatsGridLabel.AddThemeFontSizeOverride("font_size", 19);
+            _profileStatsGridLabel.AddThemeFontSizeOverride("font_size", 18);
+
+            var deleteAccountBtn = CreateActionButton("🗑️ Eliminar Cuenta Permanentemente", () =>
+            {
+                _deleteAccountConfirmPanel.Visible = !_deleteAccountConfirmPanel.Visible;
+            }, minHeight: 46);
+
+            _deleteAccountConfirmPanel = CreateStyledPanel(
+                new Color(0.24f, 0.11f, 0.14f),
+                NegativeDeltaColor,
+                borderWidth: 2,
+                cornerRadius: 12,
+                contentMargin: 10);
+            _deleteAccountConfirmPanel.Visible = false;
+
+            var delCol = new VBoxContainer();
+            delCol.AddThemeConstantOverride("separation", 8);
+            var delLbl = new Label
+            {
+                Text = "⚠ ¿Seguro que deseas eliminar permanentemente tu cuenta, puntos y estadísticas del servidor y de este dispositivo?",
+                HorizontalAlignment = HorizontalAlignment.Center,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart
+            };
+            delLbl.AddThemeFontSizeOverride("font_size", 17);
+            delLbl.AddThemeColorOverride("font_color", NegativeDeltaColor);
+            delCol.AddChild(delLbl);
+
+            var delRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+            delRow.AddThemeConstantOverride("separation", 10);
+            var confirmDelBtn = CreateActionButton("🗑️ Sí, Eliminar Definitivamente", OnConfirmDeleteAccountPressed, minHeight: 48);
+            var cancelDelBtn = CreateActionButton("✕ Cancelar", () => _deleteAccountConfirmPanel.Visible = false, minHeight: 48);
+            delRow.AddChild(confirmDelBtn);
+            delRow.AddChild(cancelDelBtn);
+            delCol.AddChild(delRow);
+            _deleteAccountConfirmPanel.AddChild(delCol);
 
             profileCol.AddChild(headerRow);
             profileCol.AddChild(_profileRatingBigLabel);
             profileCol.AddChild(_profileStatsGridLabel);
+            profileCol.AddChild(deleteAccountBtn);
+            profileCol.AddChild(_deleteAccountConfirmPanel);
             profileCard.AddChild(profileCol);
             col.AddChild(profileCard);
 
@@ -1652,6 +1983,10 @@ namespace FractalTicTacToe.GodotClient
 
         private void OnLogoutPressed()
         {
+            if (_deleteAccountConfirmPanel != null)
+            {
+                _deleteAccountConfirmPanel.Visible = false;
+            }
             ClearSavedSessionFromDisk();
             _onlineClient.Disconnect();
             _authenticatedUsername = string.Empty;
@@ -1659,6 +1994,59 @@ namespace FractalTicTacToe.GodotClient
             _authPasswordInput.Text = string.Empty;
             _authFeedbackLabel.Text = "Sesión cerrada correctamente.";
             NavigateToScreen(ScreenState.AuthScreen);
+        }
+
+        private void OnConfirmDeleteAccountPressed()
+        {
+            if (_deleteAccountConfirmPanel != null)
+            {
+                _deleteAccountConfirmPanel.Visible = false;
+            }
+
+            string user = _authenticatedUsername;
+            string pass = !string.IsNullOrEmpty(_authenticatedPassword)
+                ? _authenticatedPassword
+                : (_authPasswordInput?.Text ?? string.Empty);
+
+            if (!string.IsNullOrEmpty(user) && user != "Invitado")
+            {
+                _localAuthStore.DeleteAccount(user, pass, out _);
+                SaveLocalAccountsToDisk();
+            }
+
+            if (_onlineClient.IsConnected && _onlineClient.IsAuthenticated && !string.IsNullOrEmpty(pass))
+            {
+                _onlineClient.RequestDeleteAccount(pass);
+            }
+
+            ClearSavedSessionFromDisk();
+            _onlineClient.Disconnect();
+            _authenticatedUsername = string.Empty;
+            _authenticatedPassword = string.Empty;
+            if (_authUsernameInput != null) _authUsernameInput.Text = string.Empty;
+            if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
+            if (_authFeedbackLabel != null)
+            {
+                _authFeedbackLabel.Text = "✓ Tu cuenta y todos tus datos han sido eliminados permanentemente.";
+                _authFeedbackLabel.AddThemeColorOverride("font_color", PositiveDeltaColor);
+            }
+            NavigateToScreen(ScreenState.AuthScreen);
+        }
+
+        private void OnOnlineAccountDeleted(string deletedUsername)
+        {
+            Callable.From(() =>
+            {
+                ClearSavedSessionFromDisk();
+                _authenticatedUsername = string.Empty;
+                _authenticatedPassword = string.Empty;
+                if (_authFeedbackLabel != null)
+                {
+                    _authFeedbackLabel.Text = $"✓ Cuenta '{deletedUsername}' eliminada permanentemente del servidor.";
+                    _authFeedbackLabel.AddThemeColorOverride("font_color", PositiveDeltaColor);
+                }
+                NavigateToScreen(ScreenState.AuthScreen);
+            }).CallDeferred();
         }
 
         private void RefreshProfileScreenUI()
@@ -2249,6 +2637,19 @@ namespace FractalTicTacToe.GodotClient
                 bool myClockActive = !state.IsGameOver && !clock.IsWaitingForFirstMove && state.CurrentPlayer == myRole;
                 bool oppClockActive = !state.IsGameOver && !clock.IsWaitingForFirstMove && state.CurrentPlayer == oppRole;
 
+                if (myClockActive && mySeconds <= 10.0 && mySeconds > 0.0)
+                {
+                    if (!_lowTimeBeepPlayed)
+                    {
+                        _lowTimeBeepPlayed = true;
+                        PlaySynthesizedSound(GameSoundEffect.LowTimeWarning);
+                    }
+                }
+                else
+                {
+                    _lowTimeBeepPlayed = false;
+                }
+
                 StyleClockLabel(_leftClockLabel, mySeconds, myClockActive);
                 StyleClockLabel(_rightClockLabel, oppSeconds, oppClockActive);
             }
@@ -2336,6 +2737,7 @@ namespace FractalTicTacToe.GodotClient
             {
                 _lastAnimatedMove = lastMove.Value;
                 AnimateButtonPop(_cellButtons[lastMove.Value.BoardIndex, lastMove.Value.CellIndex]);
+                PlaySynthesizedSound(GameSoundEffect.MoveTap);
             }
 
             if (hasWinningLine && !_victoryLineAnimated)
@@ -2345,6 +2747,11 @@ namespace FractalTicTacToe.GodotClient
                 AnimateButtonPop(_cellButtons[winBoard, winC1], 0.44f);
                 AnimateButtonPop(_cellButtons[winBoard, winC2], 0.50f);
                 AnimateControlPulse(_statusBannerPanel);
+
+                Player myRole = _isOnlineMode
+                    ? (_onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X)
+                    : (_localSession.Mode == SessionMode.BotVsHumanO ? Player.O : Player.X);
+                PlaySynthesizedSound(state.Winner == myRole ? GameSoundEffect.SuddenDeathVictory : GameSoundEffect.MatchDefeat);
             }
             else if (!state.IsGameOver)
             {

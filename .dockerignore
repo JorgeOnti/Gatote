@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.godot/
+**/.mono/
+FractalTicTacToe.Godot/
+FractalTicTacToe.Maui/
+.git/

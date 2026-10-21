@@ -26,6 +26,7 @@ namespace FractalTicTacToe.Maui
 
         private enum ScreenState
         {
+            SplashLoading = -1,
             AuthScreen = 0,
             HomeLobby = 1,
             PlayArena = 2,
@@ -40,7 +41,7 @@ namespace FractalTicTacToe.Maui
             LocalPassAndPlay = 2
         }
 
-        private ScreenState _currentScreen = ScreenState.AuthScreen;
+        private ScreenState _currentScreen = ScreenState.SplashLoading;
         private LobbyOpponentType _selectedOpponentType = LobbyOpponentType.BotMinimax;
         private BotDifficulty _selectedBotDifficulty = BotDifficulty.Hard;
         private int _timeControlIndex = 2; // Blitz 3+2 por defecto
@@ -55,6 +56,20 @@ namespace FractalTicTacToe.Maui
         private string _authenticatedUsername = string.Empty;
         private string _authenticatedPassword = string.Empty;
         private double _queueElapsedSeconds;
+
+        // Pantalla Splash de Carga Inicial con Logo y Barra de Progreso
+        private View _splashScreenView;
+        private ProgressBar _splashProgressBar;
+        private Label _splashPercentLabel;
+        private Label _splashStatusLabel;
+        private double _splashProgress;
+        private bool _splashCompleted;
+
+        // Audio y Vibración Háptica
+        private Button _soundToggleBtn;
+        private bool _isMuted;
+        private bool _lowTimeBeepPlayed;
+        private Move? _lastAnimatedMove;
 
         private readonly List<MatchRecord> _recordedMatches = new List<MatchRecord>();
         private MatchReplayNavigator _replayNavigator;
@@ -86,6 +101,7 @@ namespace FractalTicTacToe.Maui
         private static readonly Color MutedTextColor = Color.FromRgb(178, 194, 219);
 
         // Contenedores de pantallas
+        private View _topHeaderView;
         private View _authScreenView;
         private View _homeScreenView;
         private View _playScreenView;
@@ -190,6 +206,7 @@ namespace FractalTicTacToe.Maui
             _onlineClient = new OnlineMultiplayerClient();
             _onlineClient.StateChanged += OnAnySessionStateChanged;
             _onlineClient.Authenticated += OnOnlineAuthenticated;
+            _onlineClient.AccountDeleted += OnOnlineAccountDeleted;
             _onlineClient.MatchStarted += OnOnlineMatchStarted;
             _onlineClient.MatchEnded += OnOnlineMatchEnded;
             _onlineClient.ErrorReceived += OnOnlineErrorReceived;
@@ -198,20 +215,10 @@ namespace FractalTicTacToe.Maui
             BuildMobileShellUI();
             StartClockTimer();
 
-            // Si el usuario ya inició sesión anteriormente en este teléfono, entra directo a 🏠 Inicio
-            if (TryLoadSavedSession(out string savedUser, out string savedPass))
-            {
-                _authenticatedUsername = savedUser;
-                _authenticatedPassword = savedPass;
-                _localSession.ProfileX.Username = savedUser;
-                NavigateToScreen(ScreenState.HomeLobby);
-                _ = AuthenticateSavedSessionInBackgroundAsync(savedUser, savedPass);
-            }
-            else
-            {
-                NavigateToScreen(ScreenState.AuthScreen);
-            }
-
+            // Mostrar primero la pantalla Splash con el Logo Oficial y la Barra de Loading (0% -> 100%)
+            _splashProgress = 0.0;
+            _splashCompleted = false;
+            NavigateToScreen(ScreenState.SplashLoading);
             RefreshUI();
         }
 
@@ -243,6 +250,38 @@ namespace FractalTicTacToe.Maui
 
         private void OnTimerTick(double delta)
         {
+            if (_currentScreen == ScreenState.SplashLoading && !_splashCompleted)
+            {
+                _splashProgress = Math.Min(1.0, _splashProgress + delta / 1.3);
+                int pct = (int)Math.Round(_splashProgress * 100.0);
+                if (_splashProgressBar != null)
+                {
+                    _splashProgressBar.Progress = _splashProgress;
+                }
+                if (_splashPercentLabel != null)
+                {
+                    _splashPercentLabel.Text = $"{pct}%";
+                }
+                if (_splashStatusLabel != null)
+                {
+                    if (_splashProgress < 0.35)
+                        _splashStatusLabel.Text = "Cargando motor táctico Minimax + Zobrist...";
+                    else if (_splashProgress < 0.72)
+                        _splashStatusLabel.Text = "Inicializando tableros fractales y audio...";
+                    else if (_splashProgress < 0.99)
+                        _splashStatusLabel.Text = "Verificando sesión guardada en el dispositivo...";
+                    else
+                        _splashStatusLabel.Text = "¡Listo!";
+                }
+
+                if (_splashProgress >= 1.0)
+                {
+                    _splashCompleted = true;
+                    CompleteInitialSplashTransition();
+                }
+                return;
+            }
+
             if (_onlineClient.IsInQueue)
             {
                 _queueElapsedSeconds += delta;
@@ -271,6 +310,25 @@ namespace FractalTicTacToe.Maui
             }
         }
 
+        private void CompleteInitialSplashTransition()
+        {
+            PlayMobileSoundEffect(GameSoundEffect.MoveTap);
+
+            // Si el usuario ya inició sesión anteriormente en este teléfono, entra directo a 🏠 Inicio
+            if (TryLoadSavedSession(out string savedUser, out string savedPass))
+            {
+                _authenticatedUsername = savedUser;
+                _authenticatedPassword = savedPass;
+                _localSession.ProfileX.Username = savedUser;
+                NavigateToScreen(ScreenState.HomeLobby);
+                _ = AuthenticateSavedSessionInBackgroundAsync(savedUser, savedPass);
+            }
+            else
+            {
+                NavigateToScreen(ScreenState.AuthScreen);
+            }
+        }
+
         // =====================================================================
         // ARQUITECTURA DE SHELL MÓVIL + NAVEGACIÓN (3 PESTAÑAS)
         // =====================================================================
@@ -290,16 +348,19 @@ namespace FractalTicTacToe.Maui
             };
 
             // 1. Barra Superior
-            rootGrid.Add(BuildTopAppHeader(), 0, 0);
+            _topHeaderView = BuildTopAppHeader();
+            rootGrid.Add(_topHeaderView, 0, 0);
 
             // 2. Contenedor Central de Vistas
             var screenHost = new Grid();
+            _splashScreenView = BuildSplashLoadingScreen();
             _authScreenView = BuildAuthScreen();
             _homeScreenView = BuildHomeLobbyScreen();
             _playScreenView = BuildPlayArenaScreen();
             _analysisScreenView = BuildAnalysisStudioScreen();
             _profileScreenView = BuildProfileAndLeaguesScreen();
 
+            screenHost.Add(_splashScreenView);
             screenHost.Add(_authScreenView);
             screenHost.Add(_homeScreenView);
             screenHost.Add(_playScreenView);
@@ -314,6 +375,70 @@ namespace FractalTicTacToe.Maui
             Content = rootGrid;
         }
 
+        private View BuildSplashLoadingScreen()
+        {
+            var outerGrid = new Grid
+            {
+                VerticalOptions = LayoutOptions.Fill,
+                HorizontalOptions = LayoutOptions.Fill
+            };
+
+            var card = CreateCardBorder(CardBgColor, ActiveMacroBorderColor, strokeThickness: 2.5, cornerRadius: 20, padding: new Thickness(20));
+            card.VerticalOptions = LayoutOptions.Center;
+            card.HorizontalOptions = LayoutOptions.Fill;
+
+            var stack = new VerticalStackLayout { Spacing = 14 };
+
+            var logoImg = new Image
+            {
+                Source = ImageSource.FromResource("FractalTicTacToe.Maui.Assets.gatote_logo.png", typeof(MainPage).Assembly),
+                Aspect = Aspect.AspectFit,
+                HeightRequest = 210,
+                HorizontalOptions = LayoutOptions.Center
+            };
+            stack.Add(logoImg);
+
+            stack.Add(new Label
+            {
+                Text = "⚡ GATOTE FRACTAL • MUERTE SÚBITA",
+                FontSize = 18,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = ActiveMacroBorderColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            });
+
+            _splashProgressBar = new ProgressBar
+            {
+                Progress = 0.0,
+                ProgressColor = ActiveMacroBorderColor,
+                HeightRequest = 12
+            };
+            stack.Add(_splashProgressBar);
+
+            _splashPercentLabel = new Label
+            {
+                Text = "0%",
+                FontSize = 16,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = LastMoveHighlightColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            };
+            stack.Add(_splashPercentLabel);
+
+            _splashStatusLabel = new Label
+            {
+                Text = "Cargando motor táctico Minimax + Zobrist...",
+                FontSize = 13,
+                TextColor = MutedTextColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            };
+            stack.Add(_splashStatusLabel);
+
+            card.Content = stack;
+            outerGrid.Add(card);
+            return outerGrid;
+        }
+
         private View BuildTopAppHeader()
         {
             var headerBorder = CreateCardBorder(SurfaceColor, InactiveMacroBorderColor, strokeThickness: 1.5, cornerRadius: 12, padding: new Thickness(10, 6));
@@ -323,6 +448,7 @@ namespace FractalTicTacToe.Maui
                 ColumnDefinitions =
                 {
                     new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Auto },
                     new ColumnDefinition { Width = GridLength.Auto }
                 },
                 RowDefinitions =
@@ -330,13 +456,13 @@ namespace FractalTicTacToe.Maui
                     new RowDefinition { Height = GridLength.Auto },
                     new RowDefinition { Height = GridLength.Auto }
                 },
-                ColumnSpacing = 8
+                ColumnSpacing = 6
             };
 
             var brandTitle = new Label
             {
                 Text = "⚡ GATOTE FRACTAL",
-                FontSize = 17,
+                FontSize = 16,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 VerticalOptions = LayoutOptions.Center
@@ -354,6 +480,27 @@ namespace FractalTicTacToe.Maui
             };
             _serverHostPillBtn.Clicked += OnConfigureServerHostClicked;
 
+            _soundToggleBtn = new Button
+            {
+                Text = "🔊",
+                FontSize = 12,
+                HeightRequest = 28,
+                WidthRequest = 38,
+                Padding = Thickness.Zero,
+                CornerRadius = 8,
+                BackgroundColor = Color.FromRgb(32, 44, 66),
+                TextColor = Colors.White
+            };
+            _soundToggleBtn.Clicked += (_, _) =>
+            {
+                _isMuted = !_isMuted;
+                _soundToggleBtn.Text = _isMuted ? "🔇" : "🔊";
+                if (!_isMuted)
+                {
+                    PlayMobileSoundEffect(GameSoundEffect.MoveTap);
+                }
+            };
+
             _topHeaderSubtitleLabel = new Label
             {
                 Text = "Inicia Sesión",
@@ -363,8 +510,9 @@ namespace FractalTicTacToe.Maui
 
             grid.Add(brandTitle, 0, 0);
             grid.Add(_serverHostPillBtn, 1, 0);
+            grid.Add(_soundToggleBtn, 2, 0);
             grid.Add(_topHeaderSubtitleLabel, 0, 1);
-            Grid.SetColumnSpan(_topHeaderSubtitleLabel, 2);
+            Grid.SetColumnSpan(_topHeaderSubtitleLabel, 3);
 
             headerBorder.Content = grid;
             return headerBorder;
@@ -461,6 +609,15 @@ namespace FractalTicTacToe.Maui
 
             _currentScreen = targetScreen;
 
+            if (_topHeaderView != null)
+            {
+                _topHeaderView.IsVisible = targetScreen != ScreenState.SplashLoading;
+            }
+            if (_splashScreenView != null)
+            {
+                _splashScreenView.IsVisible = targetScreen == ScreenState.SplashLoading;
+            }
+
             _authScreenView.IsVisible = targetScreen == ScreenState.AuthScreen;
             _homeScreenView.IsVisible = targetScreen == ScreenState.HomeLobby;
             _playScreenView.IsVisible = targetScreen == ScreenState.PlayArena;
@@ -509,17 +666,25 @@ namespace FractalTicTacToe.Maui
             var outerStack = new VerticalStackLayout
             {
                 VerticalOptions = LayoutOptions.Center,
-                Spacing = 14,
-                Padding = new Thickness(4, 16)
+                Spacing = 12,
+                Padding = new Thickness(4, 12)
             };
 
-            var card = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 2, cornerRadius: 16, padding: new Thickness(18));
-            var formStack = new VerticalStackLayout { Spacing = 12 };
+            var card = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 2, cornerRadius: 16, padding: new Thickness(16));
+            var formStack = new VerticalStackLayout { Spacing = 10 };
+
+            formStack.Add(new Image
+            {
+                Source = ImageSource.FromResource("FractalTicTacToe.Maui.Assets.gatote_logo.png", typeof(MainPage).Assembly),
+                Aspect = Aspect.AspectFit,
+                HeightRequest = 125,
+                HorizontalOptions = LayoutOptions.Center
+            });
 
             formStack.Add(new Label
             {
                 Text = "🔐 ACCESO DE JUGADOR",
-                FontSize = 21,
+                FontSize = 20,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -528,7 +693,7 @@ namespace FractalTicTacToe.Maui
             formStack.Add(new Label
             {
                 Text = "Inicia sesión una sola vez o regístrate como nuevo usuario. Tu sesión quedará guardada automáticamente en este dispositivo.",
-                FontSize = 13,
+                FontSize = 12,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
             });
@@ -539,7 +704,7 @@ namespace FractalTicTacToe.Maui
                 PlaceholderColor = Color.FromRgb(120, 135, 160),
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
-                HeightRequest = 46
+                HeightRequest = 44
             };
 
             _authPasswordInput = new Entry
@@ -549,7 +714,7 @@ namespace FractalTicTacToe.Maui
                 IsPassword = true,
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
-                HeightRequest = 46
+                HeightRequest = 44
             };
 
             _authFeedbackLabel = new Label
@@ -567,24 +732,56 @@ namespace FractalTicTacToe.Maui
                     new ColumnDefinition { Width = GridLength.Star },
                     new ColumnDefinition { Width = GridLength.Star }
                 },
-                ColumnSpacing = 10
+                ColumnSpacing = 8
             };
 
-            _loginBtn = CreateActionButton("🔑 Iniciar Sesión", () => OnSubmitAuthPressed(isRegister: false), height: 48, fontSize: 14);
-            _registerBtn = CreateActionButton("📝 Registrarse", () => OnSubmitAuthPressed(isRegister: true), height: 48, fontSize: 14);
+            _loginBtn = CreateActionButton("🔑 Iniciar Sesión", () => OnSubmitAuthPressed(isRegister: false), height: 46, fontSize: 13);
+            _registerBtn = CreateActionButton("📝 Registrarse", () => OnSubmitAuthPressed(isRegister: true), height: 46, fontSize: 13);
 
             btnGrid.Add(_loginBtn, 0, 0);
             btnGrid.Add(_registerBtn, 1, 0);
+
+            var extraGrid = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star }
+                },
+                ColumnSpacing = 8
+            };
+
+            var guestBtn = CreateActionButton("👤 Modo Invitado", () =>
+            {
+                _authenticatedUsername = "Invitado";
+                _authenticatedPassword = string.Empty;
+                _localSession.ProfileX.Username = "Invitado";
+                NavigateToScreen(ScreenState.HomeLobby);
+            }, height: 40, fontSize: 12);
+
+            var privacyBtn = CreateActionButton("🔒 Privacidad", OnShowPrivacyPolicyClicked, height: 40, fontSize: 12);
+
+            extraGrid.Add(guestBtn, 0, 0);
+            extraGrid.Add(privacyBtn, 1, 0);
 
             formStack.Add(_authUsernameInput);
             formStack.Add(_authPasswordInput);
             formStack.Add(_authFeedbackLabel);
             formStack.Add(btnGrid);
+            formStack.Add(extraGrid);
 
             card.Content = formStack;
             outerStack.Add(card);
             scroll.Content = outerStack;
             return scroll;
+        }
+
+        private async void OnShowPrivacyPolicyClicked()
+        {
+            await DisplayAlert(
+                "🔒 Política de Privacidad — Gatote Fractal",
+                SoundEffectsSynthesizer.PrivacyPolicyInAppText,
+                "Entendido");
         }
 
         private async void OnSubmitAuthPressed(bool isRegister)
@@ -1403,22 +1600,26 @@ namespace FractalTicTacToe.Maui
                 ColumnDefinitions =
                 {
                     new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Auto },
                     new ColumnDefinition { Width = GridLength.Auto }
-                }
+                },
+                ColumnSpacing = 6
             };
 
             _profileNameLabel = new Label
             {
                 Text = "👤 Jugador (Tú)",
-                FontSize = 18,
+                FontSize = 17,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 VerticalOptions = LayoutOptions.Center
             };
 
-            var logoutBtn = CreateActionButton("🚪 Cerrar Sesión", OnLogoutPressed, height: 36, fontSize: 12);
+            var privacyBtn = CreateActionButton("🔒 Privacidad", OnShowPrivacyPolicyClicked, height: 34, fontSize: 11);
+            var logoutBtn = CreateActionButton("🚪 Salir", OnLogoutPressed, height: 34, fontSize: 11);
             headerRow.Add(_profileNameLabel, 0, 0);
-            headerRow.Add(logoutBtn, 1, 0);
+            headerRow.Add(privacyBtn, 1, 0);
+            headerRow.Add(logoutBtn, 2, 0);
 
             _profileRatingBigLabel = new Label
             {
@@ -1437,9 +1638,14 @@ namespace FractalTicTacToe.Maui
                 HorizontalTextAlignment = TextAlignment.Center
             };
 
+            var deleteAccountBtn = CreateActionButton("🗑️ Eliminar Cuenta Permanentemente", OnDeleteAccountClicked, height: 36, fontSize: 12);
+            deleteAccountBtn.BackgroundColor = Color.FromRgb(68, 28, 36);
+            deleteAccountBtn.TextColor = NegativeDeltaColor;
+
             profileStack.Add(headerRow);
             profileStack.Add(_profileRatingBigLabel);
             profileStack.Add(_profileStatsGridLabel);
+            profileStack.Add(deleteAccountBtn);
             profileCard.Content = profileStack;
             col.Add(profileCard);
 
@@ -1522,6 +1728,65 @@ namespace FractalTicTacToe.Maui
             if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
             if (_authFeedbackLabel != null) _authFeedbackLabel.Text = "Sesión cerrada correctamente.";
             NavigateToScreen(ScreenState.AuthScreen);
+        }
+
+        private async void OnDeleteAccountClicked()
+        {
+            string displayUser = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Invitado";
+            bool confirm = await DisplayAlert(
+                "🗑️ Eliminar Cuenta Permanentemente",
+                $"¿Estás seguro de que deseas eliminar permanentemente la cuenta '{displayUser}', tus puntos de liga y estadísticas del servidor y de este dispositivo? Esta acción no se puede deshacer.",
+                "Sí, Eliminar Cuenta",
+                "Cancelar");
+
+            if (!confirm)
+            {
+                return;
+            }
+
+            string pass = !string.IsNullOrEmpty(_authenticatedPassword)
+                ? _authenticatedPassword
+                : (_authPasswordInput?.Text ?? string.Empty);
+
+            if (!string.IsNullOrEmpty(_authenticatedUsername) && _authenticatedUsername != "Invitado")
+            {
+                _localAuthStore.DeleteAccount(_authenticatedUsername, pass, out _);
+                SaveLocalAccountsToDisk();
+            }
+
+            if (_onlineClient.IsConnected && _onlineClient.IsAuthenticated && !string.IsNullOrEmpty(pass))
+            {
+                _onlineClient.RequestDeleteAccount(pass);
+            }
+
+            ClearSavedSessionFromDisk();
+            _onlineClient.Disconnect();
+            _authenticatedUsername = string.Empty;
+            _authenticatedPassword = string.Empty;
+            if (_authUsernameInput != null) _authUsernameInput.Text = string.Empty;
+            if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
+            if (_authFeedbackLabel != null)
+            {
+                _authFeedbackLabel.Text = "✓ Tu cuenta y todos tus datos han sido eliminados permanentemente.";
+                _authFeedbackLabel.TextColor = PositiveDeltaColor;
+            }
+            NavigateToScreen(ScreenState.AuthScreen);
+        }
+
+        private void OnOnlineAccountDeleted(string deletedUsername)
+        {
+            Dispatcher.Dispatch(() =>
+            {
+                ClearSavedSessionFromDisk();
+                _authenticatedUsername = string.Empty;
+                _authenticatedPassword = string.Empty;
+                if (_authFeedbackLabel != null)
+                {
+                    _authFeedbackLabel.Text = $"✓ Cuenta '{deletedUsername}' eliminada permanentemente del servidor.";
+                    _authFeedbackLabel.TextColor = PositiveDeltaColor;
+                }
+                NavigateToScreen(ScreenState.AuthScreen);
+            });
         }
 
         // =====================================================================
@@ -2116,6 +2381,19 @@ namespace FractalTicTacToe.Maui
             bool myClockActive = !state.IsGameOver && !clock.IsWaitingForFirstMove && state.CurrentPlayer == myRole;
             bool oppClockActive = !state.IsGameOver && !clock.IsWaitingForFirstMove && state.CurrentPlayer == oppRole;
 
+            if (myClockActive && mySeconds <= 10.0 && mySeconds > 0.0)
+            {
+                if (!_lowTimeBeepPlayed)
+                {
+                    _lowTimeBeepPlayed = true;
+                    PlayMobileSoundEffect(GameSoundEffect.LowTimeWarning);
+                }
+            }
+            else
+            {
+                _lowTimeBeepPlayed = false;
+            }
+
             _leftClockLabel.TextColor = (mySeconds < 20.0 && myClockActive) ? NegativeDeltaColor : (myClockActive ? ActiveMacroBorderColor : MutedTextColor);
             _rightClockLabel.TextColor = (oppSeconds < 20.0 && oppClockActive) ? NegativeDeltaColor : (oppClockActive ? ActiveMacroBorderColor : MutedTextColor);
         }
@@ -2311,6 +2589,28 @@ namespace FractalTicTacToe.Maui
                     }
                 }
             }
+
+            if (ReferenceEquals(cellButtons, _cellButtons) &&
+                lastMove.HasValue &&
+                (!_lastAnimatedMove.HasValue || !_lastAnimatedMove.Value.Equals(lastMove.Value)))
+            {
+                _lastAnimatedMove = lastMove.Value;
+                if (state.IsGameOver && state.Winner != Player.None)
+                {
+                    Player myRole = _isOnlineMode
+                        ? (_onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X)
+                        : (_localSession.Mode == SessionMode.BotVsHumanO ? Player.O : Player.X);
+                    PlayMobileSoundEffect(state.Winner == myRole ? GameSoundEffect.SuddenDeathVictory : GameSoundEffect.MatchDefeat);
+                }
+                else
+                {
+                    PlayMobileSoundEffect(GameSoundEffect.MoveTap);
+                }
+            }
+            else if (ReferenceEquals(cellButtons, _cellButtons) && state.MoveCount == 0)
+            {
+                _lastAnimatedMove = null;
+            }
         }
 
         // =====================================================================
@@ -2418,6 +2718,34 @@ namespace FractalTicTacToe.Maui
                 }
             }
             catch { }
+        }
+
+        private void PlayMobileSoundEffect(GameSoundEffect effectType)
+        {
+            if (_isMuted)
+            {
+                return;
+            }
+
+            TriggerSubtleHaptic();
+
+#if ANDROID
+            try
+            {
+                Android.Media.Tone tone = effectType switch
+                {
+                    GameSoundEffect.MoveTap => Android.Media.Tone.PropBeep,
+                    GameSoundEffect.LowTimeWarning => Android.Media.Tone.CdmaAlertCallGuard,
+                    GameSoundEffect.SuddenDeathVictory => Android.Media.Tone.PropAck,
+                    GameSoundEffect.MatchDefeat => Android.Media.Tone.PropNack,
+                    _ => Android.Media.Tone.PropBeep
+                };
+                int durationMs = effectType == GameSoundEffect.SuddenDeathVictory ? 220 : 85;
+                using var toneGen = new Android.Media.ToneGenerator(Android.Media.Stream.Music, 70);
+                toneGen.StartTone(tone, durationMs);
+            }
+            catch { }
+#endif
         }
 
         private static void ConfigureOnlineRatingLabel(Label label, int rating, string rankTitle, int? delta)

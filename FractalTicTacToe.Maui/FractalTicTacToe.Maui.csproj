@@ -26,6 +26,18 @@
 		<AndroidManifest>Platforms\Android\AndroidManifest.xml</AndroidManifest>
 	</PropertyGroup>
 
+	<PropertyGroup Condition="'$(Configuration)' == 'Release' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
+		<AndroidPackageFormat>aab</AndroidPackageFormat>
+		<AndroidKeyStore Condition="Exists('gatote-release.keystore')">true</AndroidKeyStore>
+		<AndroidSigningKeyStore Condition="Exists('gatote-release.keystore')">gatote-release.keystore</AndroidSigningKeyStore>
+		<AndroidSigningKeyAlias Condition="Exists('gatote-release.keystore')">gatote_key</AndroidSigningKeyAlias>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<EmbeddedResource Include="Assets\gatote_logo.png" />
+		<EmbeddedResource Include="Assets\gatote_icon.png" />
+	</ItemGroup>
+
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Maui.Controls.Compatibility" Version="$(MauiVersion)" />

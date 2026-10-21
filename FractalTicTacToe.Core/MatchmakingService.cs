@@ -143,6 +143,42 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
+        /// Elimina permanentemente la cuenta y datos asociados del jugador (Requisito de Google Play y Apple App Store).
+        /// </summary>
+        public bool DeleteAccount(string username, string password, out string errorMessage)
+        {
+            errorMessage = null;
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                errorMessage = "Nombre de usuario no especificado.";
+                return false;
+            }
+
+            string cleanName = username.Trim();
+            lock (_syncLock)
+            {
+                if (!_accountsByUsername.TryGetValue(cleanName, out PlayerProfile existing))
+                {
+                    errorMessage = "La cuenta no existe.";
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(existing.PasswordHash) &&
+                    !string.IsNullOrEmpty(password) &&
+                    !existing.VerifyPassword(password))
+                {
+                    errorMessage = "Contraseña incorrecta para eliminar la cuenta.";
+                    return false;
+                }
+
+                RemoveFromQueueInternal(existing.PlayerId);
+                _accountsByUsername.Remove(cleanName);
+                _accountsById.Remove(existing.PlayerId);
+                return true;
+            }
+        }
+
+        /// <summary>
         /// Sobrecarga por defecto que encola en <see cref="TimeControlConfig.Blitz3Plus2"/>.
         /// </summary>
         public OnlineMatchRoom EnqueueOrMatchPlayer(string playerId, int maxEloGap = 400)

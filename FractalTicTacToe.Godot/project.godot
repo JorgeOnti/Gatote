@@ -14,9 +14,13 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
-config/name="Fractal Tic-Tac-Toe (Muerte Súbita)"
+config/name="Gatote Fractal • Muerte Súbita"
 run/main_scene="res://Scenes/Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Mobile")
+boot_splash/bg_color=Color(0.0588235, 0.0784314, 0.121569, 1)
+boot_splash/image="res://Assets/gatote_logo.png"
+boot_splash/fullsize=false
+config/icon="res://Assets/gatote_icon.png"
 
 [display]
 
@@ -40,3 +44,4 @@ pointing/emulate_touch_from_mouse=true
 
 renderer/rendering_method="mobile"
 anti_aliasing/quality/msaa_2d=1
+environment/defaults/default_clear_color=Color(0.0588235, 0.0784314, 0.121569, 1)

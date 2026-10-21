@@ -33,17 +33,24 @@ Gatote/
 │   ├── TranspositionTable.cs      # Tabla de Transposición Zobrist de 2^18 entradas sin GC allocations
 │   ├── MatchClock.cs              # Reloj Fischer dual + Temporizador de 30s para el primer movimiento
 │   ├── EloRatingCalculator.cs     # Sistema de puntuación competitiva (pts) y Ligas Fractales
-│   ├── MatchmakingService.cs      # Registro/Login con SHA-256, cola filtrada por modo de tiempo e historial
+│   ├── MatchmakingService.cs      # Registro/Login/DeleteAccount con SHA-256, cola filtrada por modo de tiempo e historial
 │   ├── OnlineMatchRoom.cs         # Sala autoritativa Anti-Cheat, Takeback mutuo, Timeout, Abort y Revancha
 │   ├── OnlineMultiplayerClient.cs # Cliente TCP asíncrono compartido entre MAUI, Godot 4 y Consola
-│   └── MatchReplayNavigator.cs    # Motor de sala de análisis y repetición jugada por jugada
-├── FractalTicTacToe.Maui/         # App Móvil Nativa .NET MAUI (Android, iOS y Windows) lista para Visual Studio
-│   └── MainPage.cs                # Interfaz multi-pantalla con Haptics, Auto-Login y selector rápido de IP LAN
+│   ├── MatchReplayNavigator.cs    # Motor de sala de análisis y repetición jugada por jugada
+│   └── SoundEffectsSynthesizer.cs # Sintetizador procedural PCM/WAV de 16 bits en memoria + Política de Privacidad
+├── Assets/                        # Arte comercial oficial del juego
+│   ├── gatote_icon.png            # Icono oficial de la app móvil (512×512)
+│   └── gatote_logo.png            # Logo oficial del juego para la pantalla Splash (960×540)
+├── FractalTicTacToe.Maui/         # App Móvil Nativa .NET MAUI (Android e iOS) lista para Visual Studio 2022
+│   └── MainPage.cs                # Interfaz multi-pantalla con Splash + Barra de Progreso, Haptics y Auto-Login
 ├── FractalTicTacToe.Godot/        # Aplicación Móvil (Portrait 9:16) en Godot 4 (.NET / C#)
-│   └── Scripts/MobileGameScreen.cs# Interfaz multi-pantalla en Godot 4
-├── FractalTicTacToe.Server/       # Servidor TCP dedicado autoritativo (Puerto 7777)
+│   └── Scripts/MobileGameScreen.cs# Interfaz multi-pantalla con Splash + Barra de Progreso y AudioStreamWav
+├── FractalTicTacToe.Server/       # Servidor TCP dedicado autoritativo (Puerto 7777 / Variable PORT en nube)
 ├── FractalTicTacToe.ConsoleApp/   # Cliente interactivo en consola con telemetría en vivo
-├── CoreTests/                     # Suite automatizada de 20 pruebas unitarias y de integración
+├── CoreTests/                     # Suite automatizada de 21 pruebas unitarias y de integración
+├── Dockerfile & docker-compose.yml# Empaquetado en contenedor Docker para despliegue en la nube (Render/Railway/Fly.io)
+├── PRIVACY_POLICY.md              # Política de Privacidad oficial para Google Play Store y Apple App Store
+├── STORE_PUBLISHING.md            # Guía paso a paso de firma y publicación (.aab y .ipa)
 ├── FractalTicTacToe.sln           # Solución Core + Servidor + Tests (integrada con GitHub Actions CI)
 └── FractalTicTacToe.Maui.sln      # Solución Visual Studio 2022 con .NET MAUI para Deploy directo a Android / iOS
 ```
@@ -52,7 +59,10 @@ Gatote/
 
 ## 📱 3. Experiencia de Usuario Móvil (.NET MAUI y Godot 4)
 
-- **🔐 Inicio de Sesión Persistente (Auto-Login):** La pantalla de **Iniciar Sesión / Registrarse** solo aparece para usuarios nuevos o tras cerrar sesión explícitamente. Una vez autenticado, la app entra directo a **`🏠 Inicio`**.
+- **⚡ Pantalla Splash de Carga Inicial con Logo y Barra de Progreso:** Al abrir la aplicación, se muestra el **logo oficial de Gatote Fractal** acompañado de una **barra de progreso animada (`0% -> 100%`)** que inicializa el motor táctico, el sintetizador de audio y restaura la sesión guardada sin pantallas negras.
+- **🔐 Inicio de Sesión Persistente (Auto-Login) y Modo Invitado:** La pantalla de **Iniciar Sesión / Registrarse** solo aparece para usuarios nuevos o tras cerrar sesión explícitamente. Incluye además el botón **`👤 Jugar como Invitado`** para partidas locales sin registro.
+- **🔊 Efectos de Sonido Sintetizados y Vibración Háptica:** Audio procedural PCM de 16 bits generado en memoria para movimientos, alerta de reloj bajo (`< 10s`), victoria por Muerte Súbita y derrota, con botón de silencio **`🔊 / 🔇`** en el encabezado superior.
+- **🔒 Cumplimiento con Google Play Store y Apple App Store:** Incluye visor integrado de **`🔒 Política de Privacidad`** y botón **`🗑️ Eliminar Cuenta Permanentemente`** en la pestaña **`🏆 Perfil`** (cumpliendo la directriz *Apple App Store Guideline 5.1.1(v)* y *Google Play Data Safety*).
 - **🏠 Menú Principal de 3 Pestañas (`Inicio`, `Análisis`, `Perfil`):**
   - **Contra IA (Sin límite de tiempo):** Selección directa entre 4 niveles de dificultad (`🌱 Fácil`, `⚔ Medio`, `🔥 Difícil`, `👑 Maestro`) con opción de **💡 Pista IA** exclusiva para este modo.
   - **En Línea (Competitivo con Puntos):** Emparejamiento estricto por control de tiempo (`⚡ Bullet 1+1`, `🔥 Blitz 3+0`, `⏱ Blitz 3+2`, `🏛 Rápida 5+0`) con pantalla de espera en vivo, **30 segundos para realizar el primer movimiento** antes de arrancar el reloj principal, solicitud de **Deshacer Jugada (*Takeback*)** y **Revancha** con notificación de aceptar/rechazar para el rival.

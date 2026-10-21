@@ -23,6 +23,7 @@ namespace FractalTicTacToe.Core
         public const string CmdRematchRespond = "REMATCH_RESP";     // REMATCH_RESP|<roomId>|<ACCEPT|DECLINE>
         public const string CmdLeaderboard = "LEADERBOARD";         // LEADERBOARD
         public const string CmdHistory = "HISTORY";                 // HISTORY|<username>
+        public const string CmdDeleteAccount = "DELETE_ACCOUNT";    // DELETE_ACCOUNT|<password>
 
         // Eventos Servidor -> Cliente
         public const string EvtAuthOk = "AUTH_OK";                  // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>
@@ -35,6 +36,7 @@ namespace FractalTicTacToe.Core
         public const string EvtMatchEnd = "MATCH_END";              // MATCH_END|<roomId>|<winner>|<reason>|<newEloX>|<deltaX>|<newEloO>|<deltaO>|<fen>|<movesTranscript>
         public const string EvtRematchOffered = "REMATCH_OFFERED";  // REMATCH_OFFERED|<roomId>|<requesterRole>
         public const string EvtRematchDeclined = "REMATCH_DECLINED";// REMATCH_DECLINED|<roomId>|<declinerRole>
+        public const string EvtAccountDeleted = "ACCOUNT_DELETED";  // ACCOUNT_DELETED|<username>
         public const string EvtError = "ERROR";                     // ERROR|<message>
 
         public static string BuildRegister(string username, string password) =>
@@ -95,6 +97,12 @@ namespace FractalTicTacToe.Core
 
         public static string BuildRematchDeclined(OnlineMatchRoom room, Player declinerRole) =>
             $"{EvtRematchDeclined}|{room.RoomId}|{declinerRole}";
+
+        public static string BuildDeleteAccount(string password = "") =>
+            $"{CmdDeleteAccount}|{Sanitize(password)}";
+
+        public static string BuildAccountDeleted(string username) =>
+            $"{EvtAccountDeleted}|{Sanitize(username)}";
 
         public static string BuildError(string message) => $"{EvtError}|{Sanitize(message)}";
 

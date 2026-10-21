@@ -32,8 +32,9 @@ namespace CoreTests
             RunTest("18. Máquina de Estados del Protocolo Cliente-Servidor Online", TestOnlineMultiplayerClientProtocolStateMachine);
             RunTest("19. Reloj de Partida con Incremento Fischer y Derrota por Tiempo", TestMatchClockFischerIncrementAndWinningLine);
             RunTest("20. Navegador de Repeticiones y Sala de Análisis (MatchReplayNavigator)", TestMatchReplayNavigatorStepByStep);
+            RunTest("21. Cumplimiento de Tiendas (DELETE_ACCOUNT, Privacidad y Audio PCM)", TestStoreComplianceAccountDeletionAndSoundSynthesizer);
 
-            Console.WriteLine("\n✔ ¡Las 20 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
+            Console.WriteLine("\n✔ ¡Las 21 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
             return 0;
         }
 
@@ -621,6 +622,43 @@ namespace CoreTests
 
             replay.JumpToEnd();
             Assert(replay.CurrentPly == 5 && !replay.CanStepForward, "Al saltar al final debe regresar a 5/5.");
+        }
+
+        private static void TestStoreComplianceAccountDeletionAndSoundSynthesizer()
+        {
+            // 1. Verificar eliminación permanente de cuenta (Apple App Store Guideline 5.1.1(v) y Google Play Data Safety)
+            var mm = new MatchmakingService();
+            Assert(mm.RegisterAccount("TempPlayer", "secret123", out PlayerProfile created, out _), "Debe registrar TempPlayer.");
+            Assert(created != null && created.Username == "TempPlayer", "Perfil creado debe ser TempPlayer.");
+
+            Assert(!mm.DeleteAccount("TempPlayer", "wrongpass", out string badPassErr), "No debe eliminar cuenta con contraseña incorrecta.");
+            Assert(!string.IsNullOrEmpty(badPassErr), "Debe devolver mensaje de error al fallar contraseña.");
+
+            Assert(mm.DeleteAccount("TempPlayer", "secret123", out string delErr), $"Debe eliminar cuenta con contraseña correcta ({delErr}).");
+            Assert(!mm.AuthenticateAccount("TempPlayer", "secret123", out _, out _), "La cuenta eliminada ya no debe poder iniciar sesión.");
+
+            // 2. Verificar protocolo ACCOUNT_DELETED en OnlineMultiplayerClient
+            using (var client = new OnlineMultiplayerClient())
+            {
+                string deletedEventUser = null;
+                client.AccountDeleted += u => deletedEventUser = u;
+                client.ProcessServerPacket(MultiplayerProtocol.BuildAccountDeleted("TempPlayer"));
+                Assert(deletedEventUser == "TempPlayer" && !client.IsAuthenticated, "El cliente debe procesar ACCOUNT_DELETED y limpiar sesión.");
+            }
+
+            // 3. Verificar sintetizador procedural de audio WAV/PCM y texto de Política de Privacidad
+            foreach (GameSoundEffect sfx in Enum.GetValues(typeof(GameSoundEffect)))
+            {
+                byte[] wav = SoundEffectsSynthesizer.GenerateWavFileBytes(sfx);
+                byte[] pcm = SoundEffectsSynthesizer.GeneratePcm16Bytes(sfx);
+                Assert(wav.Length > 44 && pcm.Length == wav.Length - 44, $"El efecto {sfx} debe generar cabecera WAV de 44 bytes + muestras PCM.");
+                Assert(wav[0] == (byte)'R' && wav[1] == (byte)'I' && wav[2] == (byte)'F' && wav[3] == (byte)'F', "Cabecera RIFF válida.");
+                Assert(wav[8] == (byte)'W' && wav[9] == (byte)'A' && wav[10] == (byte)'V' && wav[11] == (byte)'E', "Formato WAVE válido.");
+            }
+
+            Assert(!string.IsNullOrWhiteSpace(SoundEffectsSynthesizer.PrivacyPolicyInAppText) &&
+                   SoundEffectsSynthesizer.PrivacyPolicyInAppText.Contains("Eliminar Cuenta"),
+                   "El texto de Política de Privacidad integrado debe documentar la eliminación de cuenta.");
         }
 
         private static string BuildFenFromCells(Player[] cells, Player turn, int activeBoard)

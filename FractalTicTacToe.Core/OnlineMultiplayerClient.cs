@@ -68,6 +68,7 @@ namespace FractalTicTacToe.Core
         public event Action<Player, MatchEndReason, EloMatchUpdate> MatchEnded;
         public event Action<string[]> LeaderboardReceived;
         public event Action<string[]> HistoryReceived;
+        public event Action<string> AccountDeleted;
         public event Action<string> ErrorReceived;
         public event Action Disconnected;
 
@@ -322,6 +323,12 @@ namespace FractalTicTacToe.Core
             if (!IsConnected) return;
             string target = string.IsNullOrWhiteSpace(username) ? LocalUsername : username.Trim();
             SendRawLine($"{MultiplayerProtocol.CmdHistory}|{target}");
+        }
+
+        public void RequestDeleteAccount(string password = "")
+        {
+            if (!IsConnected) return;
+            SendRawLine(MultiplayerProtocol.BuildDeleteAccount(password));
         }
 
         public void Disconnect()
@@ -670,6 +677,17 @@ namespace FractalTicTacToe.Core
                     HasRequestedRematch = false;
                     HasOpponentOfferedRematch = false;
                     RematchDeclinedByOpponent = true;
+                    StateChanged?.Invoke();
+                    break;
+
+                case MultiplayerProtocol.EvtAccountDeleted:
+                    // ACCOUNT_DELETED|<username>
+                    string deletedUser = parts.Length >= 2 ? parts[1] : LocalUsername;
+                    LocalPlayerId = null;
+                    LocalUsername = null;
+                    IsInQueue = false;
+                    ActiveRoomId = null;
+                    AccountDeleted?.Invoke(deletedUser ?? string.Empty);
                     StateChanged?.Invoke();
                     break;
 
