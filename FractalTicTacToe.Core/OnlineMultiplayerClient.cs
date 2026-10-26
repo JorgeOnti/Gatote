@@ -19,10 +19,15 @@ namespace FractalTicTacToe.Core
         private StreamWriter _writer;
         private CancellationTokenSource _receiveCts;
         private readonly object _sendLock = new object();
+        private volatile bool _intentionalDisconnect;
+        private volatile bool _handlingUnexpectedDisconnect;
+
+        public const int DefaultConnectTimeoutMs = 3000;
 
         public bool IsConnected => _tcpClient != null && _tcpClient.Connected;
         public bool IsAuthenticated => !string.IsNullOrEmpty(LocalPlayerId);
         public bool IsInQueue { get; private set; }
+        public string PendingInviteCode { get; private set; }
         public bool IsInActiveMatch => !string.IsNullOrEmpty(ActiveRoomId) && !State.IsGameOver;
 
         public string LocalPlayerId { get; private set; }
@@ -58,10 +63,11 @@ namespace FractalTicTacToe.Core
         private TimeControlConfig _pendingQueueTimeControl = TimeControlConfig.Blitz3Plus2;
         private int _pendingQueueMaxEloGap = 400;
 
-        // Eventos para actualizar la UI de Godot 4
+        // Eventos para actualizar la UI de Godot 4 y .NET MAUI
         public event Action StateChanged;
         public event Action<string, int, string> Authenticated;
         public event Action<int> QueuedForMatch;
+        public event Action<string, string> PrivateLobbyCreated;
         public event Action<string, Player, string, int, string, int> MatchStarted;
         public event Action<Player, int> TakebackOfferedByOpponent;
         public event Action<bool> TakebackResolved;
@@ -70,6 +76,7 @@ namespace FractalTicTacToe.Core
         public event Action<string[]> HistoryReceived;
         public event Action<string> AccountDeleted;
         public event Action<string> ErrorReceived;
+        public event Action<string> ServerConnectionLost;
         public event Action Disconnected;
 
         /// <summary>
@@ -108,16 +115,60 @@ namespace FractalTicTacToe.Core
             }
 
             Disconnect();
+            _intentionalDisconnect = false;
+            _handlingUnexpectedDisconnect = false;
 
-            _tcpClient = new TcpClient();
-            await _tcpClient.ConnectAsync(host, port).ConfigureAwait(false);
+            var tcp = new TcpClient();
+            try
+            {
+                Task connectTask = tcp.ConnectAsync(host, port);
+                Task completed = await Task.WhenAny(connectTask, Task.Delay(DefaultConnectTimeoutMs)).ConfigureAwait(false);
+                if (completed != connectTask || connectTask.IsFaulted || !tcp.Connected)
+                {
+                    try { tcp.Close(); } catch { }
+                    throw new TimeoutException("No se pudo conectar al servidor.");
+                }
 
+                await connectTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                try { tcp.Close(); } catch { }
+                throw;
+            }
+
+            _tcpClient = tcp;
             NetworkStream stream = _tcpClient.GetStream();
             _reader = new StreamReader(stream, Encoding.UTF8);
             _writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
             _receiveCts = new CancellationTokenSource();
 
             _ = ReceiveLoopAsync(_receiveCts.Token);
+        }
+
+        /// <summary>
+        /// Crea una sala privada en el servidor con el control de tiempo indicado y genera un código de 4 letras/números.
+        /// </summary>
+        public void CreatePrivateLobby(TimeControlConfig timeControl)
+        {
+            if (!IsConnected || !IsAuthenticated) return;
+            Clock.Reset(timeControl);
+            IsInQueue = false;
+            PendingInviteCode = "...";
+            SendRawLine(MultiplayerProtocol.BuildCreatePrivate(timeControl.ToCode()));
+            StateChanged?.Invoke();
+        }
+
+        /// <summary>
+        /// Se une a una sala privada creada por un amigo usando su código de 4 caracteres.
+        /// </summary>
+        public void JoinPrivateLobby(string inviteCode)
+        {
+            if (!IsConnected || !IsAuthenticated || string.IsNullOrWhiteSpace(inviteCode)) return;
+            IsInQueue = false;
+            PendingInviteCode = null;
+            SendRawLine(MultiplayerProtocol.BuildJoinPrivate(inviteCode.Trim().ToUpperInvariant()));
+            StateChanged?.Invoke();
         }
 
         /// <summary>
@@ -155,12 +206,13 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Cancela la búsqueda actual en la cola de Matchmaking.
+        /// Cancela la búsqueda actual en la cola de Matchmaking o sala privada.
         /// </summary>
         public void CancelMatchmakingQueue()
         {
             _pendingQueueAfterAuth = false;
             IsInQueue = false;
+            PendingInviteCode = null;
             if (IsConnected)
             {
                 SendRawLine(MultiplayerProtocol.BuildCancelQueue());
@@ -333,6 +385,8 @@ namespace FractalTicTacToe.Core
 
         public void Disconnect()
         {
+            _intentionalDisconnect = true;
+
             try
             {
                 _receiveCts?.Cancel();
@@ -356,11 +410,78 @@ namespace FractalTicTacToe.Core
             _writer = null;
             LocalPlayerId = null;
             IsInQueue = false;
+            PendingInviteCode = null;
             ActiveRoomId = null;
             HasIncomingTakebackOffer = false;
             IsWaitingForOpponentTakebackResponse = false;
             HasRequestedRematch = false;
             HasOpponentOfferedRematch = false;
+            Clock.Pause();
+        }
+
+        /// <summary>
+        /// Simula o procesa la caída inesperada del servidor: cancela inmediatamente cualquier partida en curso
+        /// o búsqueda activa sin sumar ni restar puntos a ningún jugador y notifica a la UI para volver a Inicio.
+        /// </summary>
+        public void HandleUnexpectedServerDisconnect(string customMessage = null)
+        {
+            if (_intentionalDisconnect || _handlingUnexpectedDisconnect)
+            {
+                return;
+            }
+
+            _handlingUnexpectedDisconnect = true;
+
+            try
+            {
+                _receiveCts?.Cancel();
+            }
+            catch
+            {
+                // Ignorar
+            }
+
+            try
+            {
+                _tcpClient?.Close();
+            }
+            catch
+            {
+                // Ignorar
+            }
+
+            _tcpClient = null;
+            _reader = null;
+            _writer = null;
+            LocalPlayerId = null;
+
+            bool hadActiveMatch = !string.IsNullOrEmpty(ActiveRoomId) && !State.IsGameOver;
+            IsInQueue = false;
+            PendingInviteCode = null;
+            ActiveRoomId = null;
+            HasIncomingTakebackOffer = false;
+            IsWaitingForOpponentTakebackResponse = false;
+            HasRequestedRematch = false;
+            HasOpponentOfferedRematch = false;
+
+            Clock.Pause();
+
+            if (hadActiveMatch)
+            {
+                State.ForceConclude(Player.None);
+            }
+
+            // Nadie gana ni pierde puntos cuando cae el servidor
+            LastRatingUpdate = null;
+            LastEndReason = MatchEndReason.Aborted;
+
+            string msg = string.IsNullOrWhiteSpace(customMessage)
+                ? "Se perdió la conexión con el servidor. La partida fue cancelada sin cambio de puntos."
+                : customMessage;
+
+            ServerConnectionLost?.Invoke(msg);
+            Disconnected?.Invoke();
+            StateChanged?.Invoke();
         }
 
         public void Dispose()
@@ -385,13 +506,21 @@ namespace FractalTicTacToe.Core
             }
             catch
             {
-                // Conexión cerrada
+                // Conexión cerrada abruptamente
             }
             finally
             {
-                IsInQueue = false;
-                Disconnected?.Invoke();
-                StateChanged?.Invoke();
+                if (!_intentionalDisconnect)
+                {
+                    HandleUnexpectedServerDisconnect();
+                }
+                else
+                {
+                    IsInQueue = false;
+                    PendingInviteCode = null;
+                    Disconnected?.Invoke();
+                    StateChanged?.Invoke();
+                }
             }
         }
 
@@ -446,7 +575,20 @@ namespace FractalTicTacToe.Core
 
                 case MultiplayerProtocol.EvtQueueCancelled:
                     IsInQueue = false;
+                    PendingInviteCode = null;
                     StateChanged?.Invoke();
+                    break;
+
+                case MultiplayerProtocol.EvtPrivateCreated:
+                    // PRIVATE_CREATED|<inviteCode>|<timeControlCode>
+                    if (parts.Length >= 2)
+                    {
+                        IsInQueue = false;
+                        PendingInviteCode = parts[1];
+                        string tcCode = parts.Length >= 3 ? parts[2] : Clock.Config.ToCode();
+                        PrivateLobbyCreated?.Invoke(PendingInviteCode, tcCode);
+                        StateChanged?.Invoke();
+                    }
                     break;
 
                 case MultiplayerProtocol.EvtMatchStart:
@@ -454,6 +596,7 @@ namespace FractalTicTacToe.Core
                     if (parts.Length >= 8)
                     {
                         IsInQueue = false;
+                        PendingInviteCode = null;
                         HasIncomingTakebackOffer = false;
                         IsWaitingForOpponentTakebackResponse = false;
                         HasRequestedRematch = false;
@@ -722,16 +865,29 @@ namespace FractalTicTacToe.Core
 
         private void SendRawLine(string line)
         {
+            bool failed = false;
             lock (_sendLock)
             {
                 try
                 {
-                    _writer?.WriteLine(line);
+                    if (_writer == null || _tcpClient == null || !_tcpClient.Connected)
+                    {
+                        failed = true;
+                    }
+                    else
+                    {
+                        _writer.WriteLine(line);
+                    }
                 }
                 catch
                 {
-                    // Ignorar si el socket se cerró
+                    failed = true;
                 }
+            }
+
+            if (failed && !_intentionalDisconnect)
+            {
+                HandleUnexpectedServerDisconnect();
             }
         }
     }

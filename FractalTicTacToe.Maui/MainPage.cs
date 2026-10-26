@@ -125,12 +125,15 @@ namespace FractalTicTacToe.Maui
         // Pantalla 1: Inicio / Lobby
         private Label _lobbyProfileSummaryLabel;
         private Label _lobbyLeagueBadgeLabel;
+        private Label _lobbyNoticeLabel;
         private Button _modeBotBtn;
         private Button _modeOnlineBtn;
         private Button _modePassPlayBtn;
         private Label _lobbySection2TitleLabel;
         private Grid _botDifficultyGrid;
         private Grid _quickPairingTimeGrid;
+        private Border _privateRoomPanel;
+        private Entry _privateCodeInput;
         private Border _matchmakingLoadingPanel;
         private Label _matchmakingLoadingTitleLabel;
         private Label _matchmakingLoadingTimerLabel;
@@ -207,9 +210,11 @@ namespace FractalTicTacToe.Maui
             _onlineClient.StateChanged += OnAnySessionStateChanged;
             _onlineClient.Authenticated += OnOnlineAuthenticated;
             _onlineClient.AccountDeleted += OnOnlineAccountDeleted;
+            _onlineClient.PrivateLobbyCreated += OnOnlinePrivateLobbyCreated;
             _onlineClient.MatchStarted += OnOnlineMatchStarted;
             _onlineClient.MatchEnded += OnOnlineMatchEnded;
             _onlineClient.ErrorReceived += OnOnlineErrorReceived;
+            _onlineClient.ServerConnectionLost += OnOnlineServerConnectionLost;
             _onlineClient.LeaderboardReceived += OnLeaderboardReceived;
 
             BuildMobileShellUI();
@@ -264,14 +269,12 @@ namespace FractalTicTacToe.Maui
                 }
                 if (_splashStatusLabel != null)
                 {
-                    if (_splashProgress < 0.35)
-                        _splashStatusLabel.Text = "Cargando motor táctico Minimax + Zobrist...";
-                    else if (_splashProgress < 0.72)
-                        _splashStatusLabel.Text = "Inicializando tableros fractales y audio...";
-                    else if (_splashProgress < 0.99)
-                        _splashStatusLabel.Text = "Verificando sesión guardada en el dispositivo...";
+                    if (_splashProgress < 0.45)
+                        _splashStatusLabel.Text = "Cargando juego...";
+                    else if (_splashProgress < 0.95)
+                        _splashStatusLabel.Text = "Preparando tablero...";
                     else
-                        _splashStatusLabel.Text = "¡Listo!";
+                        _splashStatusLabel.Text = "Listo";
                 }
 
                 if (_splashProgress >= 1.0)
@@ -282,21 +285,34 @@ namespace FractalTicTacToe.Maui
                 return;
             }
 
-            if (_onlineClient.IsInQueue)
+            if (_onlineClient.IsInQueue || !string.IsNullOrEmpty(_onlineClient.PendingInviteCode))
             {
                 _queueElapsedSeconds += delta;
                 if (_matchmakingLoadingTimerLabel != null)
                 {
                     int secs = (int)Math.Floor(_queueElapsedSeconds);
-                    string dots = new string('.', (secs % 3) + 1);
-                    _matchmakingLoadingTimerLabel.Text =
-                        $"Tiempo en cola: {secs / 60:D2}:{secs % 60:D2}{dots}\n" +
-                        $"Modo estricto: {_onlineClient.Clock.Config.Name} ({_onlineClient.LocalElo} pts)";
+                    if (!string.IsNullOrEmpty(_onlineClient.PendingInviteCode) && _onlineClient.PendingInviteCode != "...")
+                    {
+                        _matchmakingLoadingTimerLabel.Text =
+                            $"Comparte el código {_onlineClient.PendingInviteCode} con tu amigo ({secs / 60:D2}:{secs % 60:D2})";
+                    }
+                    else
+                    {
+                        _matchmakingLoadingTimerLabel.Text =
+                            $"Esperando rival ({secs / 60:D2}:{secs % 60:D2}) • Modo {_onlineClient.Clock.Config.Name}";
+                    }
                 }
             }
 
             if (_isOnlineMode)
             {
+                if (_currentScreen == ScreenState.PlayArena &&
+                    !_onlineClient.IsConnected &&
+                    !_onlineClient.State.IsGameOver)
+                {
+                    _onlineClient.HandleUnexpectedServerDisconnect();
+                    return;
+                }
                 _onlineClient.TickClock(delta);
             }
             else
@@ -400,8 +416,8 @@ namespace FractalTicTacToe.Maui
 
             stack.Add(new Label
             {
-                Text = "⚡ GATOTE FRACTAL • MUERTE SÚBITA",
-                FontSize = 18,
+                Text = "GATOTE",
+                FontSize = 20,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = ActiveMacroBorderColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -427,7 +443,7 @@ namespace FractalTicTacToe.Maui
 
             _splashStatusLabel = new Label
             {
-                Text = "Cargando motor táctico Minimax + Zobrist...",
+                Text = "Cargando juego...",
                 FontSize = 13,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -461,7 +477,7 @@ namespace FractalTicTacToe.Maui
 
             var brandTitle = new Label
             {
-                Text = "⚡ GATOTE FRACTAL",
+                Text = "GATOTE",
                 FontSize = 16,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
@@ -470,7 +486,7 @@ namespace FractalTicTacToe.Maui
 
             _serverHostPillBtn = new Button
             {
-                Text = $"📡 {_serverHost}",
+                Text = $"Red: {_serverHost}",
                 FontSize = 11,
                 HeightRequest = 28,
                 Padding = new Thickness(8, 0),
@@ -482,11 +498,10 @@ namespace FractalTicTacToe.Maui
 
             _soundToggleBtn = new Button
             {
-                Text = "🔊",
-                FontSize = 12,
+                Text = "Sonido",
+                FontSize = 11,
                 HeightRequest = 28,
-                WidthRequest = 38,
-                Padding = Thickness.Zero,
+                Padding = new Thickness(8, 0),
                 CornerRadius = 8,
                 BackgroundColor = Color.FromRgb(32, 44, 66),
                 TextColor = Colors.White
@@ -494,7 +509,7 @@ namespace FractalTicTacToe.Maui
             _soundToggleBtn.Clicked += (_, _) =>
             {
                 _isMuted = !_isMuted;
-                _soundToggleBtn.Text = _isMuted ? "🔇" : "🔊";
+                _soundToggleBtn.Text = _isMuted ? "Silencio" : "Sonido";
                 if (!_isMuted)
                 {
                     PlayMobileSoundEffect(GameSoundEffect.MoveTap);
@@ -503,7 +518,7 @@ namespace FractalTicTacToe.Maui
 
             _topHeaderSubtitleLabel = new Label
             {
-                Text = "Inicia Sesión",
+                Text = "Acceso",
                 FontSize = 12,
                 TextColor = ActiveMacroBorderColor
             };
@@ -521,13 +536,13 @@ namespace FractalTicTacToe.Maui
         private async void OnConfigureServerHostClicked(object sender, EventArgs e)
         {
             string action = await DisplayActionSheet(
-                $"Servidor TCP actual: {_serverHost}:{DefaultServerPort}",
+                $"Servidor actual: {_serverHost}:{DefaultServerPort}",
                 "Cancelar",
                 null,
-                $"📶 PC en Wi-Fi ({PcLanDefaultIp})",
-                "📱 Emulador Android (10.0.2.2)",
-                "💻 Localhost PC (127.0.0.1)",
-                "✏️ Escribir otra IP manualmente...");
+                $"PC en Wi-Fi ({PcLanDefaultIp})",
+                "Emulador Android (10.0.2.2)",
+                "Local (127.0.0.1)",
+                "Escribir otra IP...");
 
             if (string.IsNullOrEmpty(action) || action == "Cancelar")
                 return;
@@ -539,11 +554,11 @@ namespace FractalTicTacToe.Maui
                 newHost = "10.0.2.2";
             else if (action.Contains("127.0.0.1"))
                 newHost = "127.0.0.1";
-            else if (action.StartsWith("✏️"))
+            else if (action.StartsWith("Escribir"))
             {
                 string custom = await DisplayPromptAsync(
                     "IP del Servidor",
-                    "Ingresa la dirección IPv4 de la PC donde corre FractalTicTacToe.Server:",
+                    "Dirección IPv4 donde corre el servidor:",
                     "Guardar",
                     "Cancelar",
                     placeholder: PcLanDefaultIp,
@@ -556,10 +571,10 @@ namespace FractalTicTacToe.Maui
             {
                 _serverHost = newHost;
                 SaveServerHostToDisk(_serverHost);
-                _serverHostPillBtn.Text = $"📡 {_serverHost}";
+                _serverHostPillBtn.Text = $"Red: {_serverHost}";
                 if (_authFeedbackLabel != null)
                 {
-                    _authFeedbackLabel.Text = $"Servidor activo: {_serverHost}:{DefaultServerPort}";
+                    _authFeedbackLabel.Text = $"Servidor: {_serverHost}:{DefaultServerPort}";
                 }
 
                 // Si ya teníamos sesión iniciada, reconectar al nuevo host en segundo plano
@@ -585,9 +600,9 @@ namespace FractalTicTacToe.Maui
                 ColumnSpacing = 8
             };
 
-            _navHomeBtn = CreateActionButton("🏠 Inicio", () => NavigateToScreen(ScreenState.HomeLobby), height: 46, fontSize: 14);
-            _navAnalysisBtn = CreateActionButton("🎬 Análisis", () => NavigateToScreen(ScreenState.AnalysisStudio), height: 46, fontSize: 14);
-            _navProfileBtn = CreateActionButton("🏆 Perfil", () => NavigateToScreen(ScreenState.ProfileAndLeagues), height: 46, fontSize: 14);
+            _navHomeBtn = CreateActionButton("Inicio", () => NavigateToScreen(ScreenState.HomeLobby), height: 44, fontSize: 14);
+            _navAnalysisBtn = CreateActionButton("Análisis", () => NavigateToScreen(ScreenState.AnalysisStudio), height: 44, fontSize: 14);
+            _navProfileBtn = CreateActionButton("Perfil", () => NavigateToScreen(ScreenState.ProfileAndLeagues), height: 44, fontSize: 14);
 
             navGrid.Add(_navHomeBtn, 0, 0);
             navGrid.Add(_navAnalysisBtn, 1, 0);
@@ -602,7 +617,7 @@ namespace FractalTicTacToe.Maui
             if (_currentScreen == ScreenState.HomeLobby &&
                 targetScreen != ScreenState.HomeLobby &&
                 targetScreen != ScreenState.PlayArena &&
-                _onlineClient.IsInQueue)
+                (_onlineClient.IsInQueue || !string.IsNullOrEmpty(_onlineClient.PendingInviteCode)))
             {
                 _onlineClient.CancelMatchmakingQueue();
             }
@@ -657,7 +672,7 @@ namespace FractalTicTacToe.Maui
         }
 
         // =====================================================================
-        // PANTALLA 0: 🔐 LOGIN Y REGISTRO (SOLO USUARIOS NUEVOS)
+        // PANTALLA 0: ACCESO (SOLO USUARIOS NUEVOS)
         // =====================================================================
 
         private View BuildAuthScreen()
@@ -670,21 +685,21 @@ namespace FractalTicTacToe.Maui
                 Padding = new Thickness(4, 12)
             };
 
-            var card = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 2, cornerRadius: 16, padding: new Thickness(16));
+            var card = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 1.5, cornerRadius: 14, padding: new Thickness(16));
             var formStack = new VerticalStackLayout { Spacing = 10 };
 
             formStack.Add(new Image
             {
                 Source = ImageSource.FromResource("FractalTicTacToe.Maui.Assets.gatote_logo.png", typeof(MainPage).Assembly),
                 Aspect = Aspect.AspectFit,
-                HeightRequest = 125,
+                HeightRequest = 115,
                 HorizontalOptions = LayoutOptions.Center
             });
 
             formStack.Add(new Label
             {
-                Text = "🔐 ACCESO DE JUGADOR",
-                FontSize = 20,
+                Text = "ACCESO",
+                FontSize = 19,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -692,7 +707,7 @@ namespace FractalTicTacToe.Maui
 
             formStack.Add(new Label
             {
-                Text = "Inicia sesión una sola vez o regístrate como nuevo usuario. Tu sesión quedará guardada automáticamente en este dispositivo.",
+                Text = "Inicia sesión o crea tu cuenta una sola vez. Tu sesión se guarda automáticamente.",
                 FontSize = 12,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -700,7 +715,7 @@ namespace FractalTicTacToe.Maui
 
             _authUsernameInput = new Entry
             {
-                Placeholder = "Nombre de usuario (mín. 3 caracteres)",
+                Placeholder = "Usuario (mín. 3 letras)",
                 PlaceholderColor = Color.FromRgb(120, 135, 160),
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
@@ -719,7 +734,7 @@ namespace FractalTicTacToe.Maui
 
             _authFeedbackLabel = new Label
             {
-                Text = $"Servidor: {_serverHost}:{DefaultServerPort} (Toca 📡 arriba si pruebas desde Android a tu PC)",
+                Text = $"Servidor: {_serverHost}:{DefaultServerPort}",
                 FontSize = 12,
                 TextColor = LastMoveHighlightColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -735,8 +750,8 @@ namespace FractalTicTacToe.Maui
                 ColumnSpacing = 8
             };
 
-            _loginBtn = CreateActionButton("🔑 Iniciar Sesión", () => OnSubmitAuthPressed(isRegister: false), height: 46, fontSize: 13);
-            _registerBtn = CreateActionButton("📝 Registrarse", () => OnSubmitAuthPressed(isRegister: true), height: 46, fontSize: 13);
+            _loginBtn = CreateActionButton("Entrar", () => OnSubmitAuthPressed(isRegister: false), height: 44, fontSize: 13);
+            _registerBtn = CreateActionButton("Crear cuenta", () => OnSubmitAuthPressed(isRegister: true), height: 44, fontSize: 13);
 
             btnGrid.Add(_loginBtn, 0, 0);
             btnGrid.Add(_registerBtn, 1, 0);
@@ -751,15 +766,15 @@ namespace FractalTicTacToe.Maui
                 ColumnSpacing = 8
             };
 
-            var guestBtn = CreateActionButton("👤 Modo Invitado", () =>
+            var guestBtn = CreateActionButton("Invitado", () =>
             {
                 _authenticatedUsername = "Invitado";
                 _authenticatedPassword = string.Empty;
                 _localSession.ProfileX.Username = "Invitado";
                 NavigateToScreen(ScreenState.HomeLobby);
-            }, height: 40, fontSize: 12);
+            }, height: 38, fontSize: 12);
 
-            var privacyBtn = CreateActionButton("🔒 Privacidad", OnShowPrivacyPolicyClicked, height: 40, fontSize: 12);
+            var privacyBtn = CreateActionButton("Privacidad", OnShowPrivacyPolicyClicked, height: 38, fontSize: 12);
 
             extraGrid.Add(guestBtn, 0, 0);
             extraGrid.Add(privacyBtn, 1, 0);
@@ -779,9 +794,9 @@ namespace FractalTicTacToe.Maui
         private async void OnShowPrivacyPolicyClicked()
         {
             await DisplayAlert(
-                "🔒 Política de Privacidad — Gatote Fractal",
+                "Política de Privacidad",
                 SoundEffectsSynthesizer.PrivacyPolicyInAppText,
-                "Entendido");
+                "Cerrar");
         }
 
         private async void OnSubmitAuthPressed(bool isRegister)
@@ -791,14 +806,14 @@ namespace FractalTicTacToe.Maui
 
             if (username.Length < 3)
             {
-                _authFeedbackLabel.Text = "⚠ El nombre de usuario debe tener al menos 3 caracteres.";
+                _authFeedbackLabel.Text = "El usuario debe tener al menos 3 letras.";
                 _authFeedbackLabel.TextColor = NegativeDeltaColor;
                 return;
             }
 
             if (password.Length < 4)
             {
-                _authFeedbackLabel.Text = "⚠ La contraseña debe tener al menos 4 caracteres.";
+                _authFeedbackLabel.Text = "La contraseña debe tener al menos 4 caracteres.";
                 _authFeedbackLabel.TextColor = NegativeDeltaColor;
                 return;
             }
@@ -807,8 +822,8 @@ namespace FractalTicTacToe.Maui
             _loginBtn.IsEnabled = false;
             _registerBtn.IsEnabled = false;
             _authFeedbackLabel.Text = isRegister
-                ? $"Registrando '{username}' en {_serverHost}:{DefaultServerPort}..."
-                : $"Iniciando sesión como '{username}' en {_serverHost}:{DefaultServerPort}...";
+                ? $"Creando cuenta '{username}'..."
+                : $"Entrando como '{username}'...";
             _authFeedbackLabel.TextColor = LastMoveHighlightColor;
 
             try
@@ -835,7 +850,7 @@ namespace FractalTicTacToe.Maui
 
                 if (!ok)
                 {
-                    _authFeedbackLabel.Text = $"⚠ {err}";
+                    _authFeedbackLabel.Text = err;
                     _authFeedbackLabel.TextColor = NegativeDeltaColor;
                     return;
                 }
@@ -888,7 +903,7 @@ namespace FractalTicTacToe.Maui
         }
 
         // =====================================================================
-        // PANTALLA 1: 🏠 INICIO Y EMPAREJAMIENTO RÁPIDO
+        // PANTALLA 1: INICIO
         // =====================================================================
 
         private View BuildHomeLobbyScreen()
@@ -896,13 +911,13 @@ namespace FractalTicTacToe.Maui
             var scroll = new ScrollView();
             var col = new VerticalStackLayout { Spacing = 10 };
 
-            // 1. Resumen de Usuario Autenticado
+            // 1. Resumen de Usuario
             var accountCard = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 1.5, cornerRadius: 12, padding: new Thickness(12, 8));
             var accountStack = new VerticalStackLayout { Spacing = 3 };
 
             _lobbyProfileSummaryLabel = new Label
             {
-                Text = "👤 Usuario: Jugador",
+                Text = "Jugador",
                 FontSize = 17,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
@@ -911,22 +926,33 @@ namespace FractalTicTacToe.Maui
 
             _lobbyLeagueBadgeLabel = new Label
             {
-                Text = "Clasificación Online: 1200 pts (Liga Plata) • 0V - 0D - 0E",
+                Text = "1200 pts • Liga Plata • 0V 0D 0E",
                 FontSize = 12,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
             };
 
+            _lobbyNoticeLabel = new Label
+            {
+                Text = string.Empty,
+                FontSize = 12,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = NegativeDeltaColor,
+                HorizontalTextAlignment = TextAlignment.Center,
+                IsVisible = false
+            };
+
             accountStack.Add(_lobbyProfileSummaryLabel);
             accountStack.Add(_lobbyLeagueBadgeLabel);
+            accountStack.Add(_lobbyNoticeLabel);
             accountCard.Content = accountStack;
             col.Add(accountCard);
 
             // 2. Selector de Modo de Juego
             col.Add(new Label
             {
-                Text = "1. ELIGE EL MODO DE JUEGO",
-                FontSize = 13,
+                Text = "MODO DE JUEGO",
+                FontSize = 12,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -943,9 +969,9 @@ namespace FractalTicTacToe.Maui
                 ColumnSpacing = 8
             };
 
-            _modeBotBtn = CreateActionButton("🤖 Contra IA", () => SelectLobbyOpponentType(LobbyOpponentType.BotMinimax), height: 46, fontSize: 13);
-            _modeOnlineBtn = CreateActionButton("🌐 En Línea", () => SelectLobbyOpponentType(LobbyOpponentType.OnlineMultiplayer), height: 46, fontSize: 13);
-            _modePassPlayBtn = CreateActionButton("📱 2 Jugadores", () => SelectLobbyOpponentType(LobbyOpponentType.LocalPassAndPlay), height: 46, fontSize: 13);
+            _modeBotBtn = CreateActionButton("Contra IA", () => SelectLobbyOpponentType(LobbyOpponentType.BotMinimax), height: 44, fontSize: 13);
+            _modeOnlineBtn = CreateActionButton("En línea", () => SelectLobbyOpponentType(LobbyOpponentType.OnlineMultiplayer), height: 44, fontSize: 13);
+            _modePassPlayBtn = CreateActionButton("2 Jugadores", () => SelectLobbyOpponentType(LobbyOpponentType.LocalPassAndPlay), height: 44, fontSize: 13);
 
             modeGrid.Add(_modeBotBtn, 0, 0);
             modeGrid.Add(_modeOnlineBtn, 1, 0);
@@ -955,38 +981,38 @@ namespace FractalTicTacToe.Maui
             // 3. Título dinámico de Sección 2
             _lobbySection2TitleLabel = new Label
             {
-                Text = "2. SELECCIONA LA DIFICULTAD DE LA IA (PARTIDA SIN TIEMPO)",
-                FontSize = 13,
+                Text = "DIFICULTAD",
+                FontSize = 12,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
             };
             col.Add(_lobbySection2TitleLabel);
 
-            // 4A. Cuadrícula 2x2 de Dificultad IA (SIN TIEMPO)
+            // 4A. Cuadrícula 2x2 de Dificultad IA (Sin tiempo)
             _botDifficultyGrid = new Grid
             {
                 RowDefinitions =
                 {
-                    new RowDefinition { Height = 96 },
-                    new RowDefinition { Height = 96 }
+                    new RowDefinition { Height = 82 },
+                    new RowDefinition { Height = 82 }
                 },
                 ColumnDefinitions =
                 {
                     new ColumnDefinition { Width = GridLength.Star },
                     new ColumnDefinition { Width = GridLength.Star }
                 },
-                RowSpacing = 10,
-                ColumnSpacing = 10
+                RowSpacing = 8,
+                ColumnSpacing = 8
             };
 
             BotDifficulty[] diffs = { BotDifficulty.Easy, BotDifficulty.Medium, BotDifficulty.Hard, BotDifficulty.Master };
             string[] diffTitles =
             {
-                "🌱 Fácil\nIdeal para aprender\nSin límite de tiempo",
-                "⚔ Medio\nTáctico equilibrado\nSin límite de tiempo",
-                "🔥 Difícil\nCálculo profundo\nSin límite de tiempo",
-                "👑 Maestro\nMinimax + Zobrist TT\nSin límite de tiempo"
+                "Fácil\nPara empezar",
+                "Medio\nEquilibrado",
+                "Difícil\nReto táctico",
+                "Maestro\nMáximo nivel"
             };
 
             for (int i = 0; i < diffs.Length; i++)
@@ -1002,46 +1028,87 @@ namespace FractalTicTacToe.Maui
             {
                 RowDefinitions =
                 {
-                    new RowDefinition { Height = 96 },
-                    new RowDefinition { Height = 96 }
+                    new RowDefinition { Height = 82 },
+                    new RowDefinition { Height = 82 }
                 },
                 ColumnDefinitions =
                 {
                     new ColumnDefinition { Width = GridLength.Star },
                     new ColumnDefinition { Width = GridLength.Star }
                 },
-                RowSpacing = 10,
-                ColumnSpacing = 10,
+                RowSpacing = 8,
+                ColumnSpacing = 8,
                 IsVisible = false
             };
 
-            string[] icons = { "⚡", "🔥", "⏱", "🏛" };
             string[] subtitles =
             {
-                "1 min + 1s incr.\nUltra rápido",
-                "3 min + 0s incr.\nRitmo intenso",
-                "3 min + 2s incr.\nEstándar competitivo",
-                "5 min + 0s incr.\nCálculo profundo"
+                "1 min + 1s\nRápido",
+                "3 min + 0s\nClásico",
+                "3 min + 2s\nEstándar",
+                "5 min + 0s\nCalma"
             };
 
             for (int i = 0; i < TimeControls.Length; i++)
             {
                 int capturedIdx = i;
                 TimeControlConfig tc = TimeControls[i];
-                Button btn = CreateLargeTileButton($"{icons[i]} {tc.Name}\n{subtitles[i]}", () => OnTimeControlCardSelected(capturedIdx));
+                Button btn = CreateLargeTileButton($"{tc.Name}\n{subtitles[i]}", () => OnTimeControlCardSelected(capturedIdx));
                 _quickPairingTimeGrid.Add(btn, i % 2, i / 2);
             }
             col.Add(_quickPairingTimeGrid);
 
-            // 4C. Panel de Loading al buscar partida en línea desde Inicio
-            _matchmakingLoadingPanel = CreateCardBorder(Color.FromRgb(25, 40, 64), ActiveMacroBorderColor, strokeThickness: 2, cornerRadius: 14, padding: new Thickness(16));
+            // 4B-Extra: Sala Privada con Amigo (Solo visible en modo En Línea)
+            _privateRoomPanel = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1, cornerRadius: 10, padding: new Thickness(10, 8));
+            _privateRoomPanel.IsVisible = false;
+            var privStack = new VerticalStackLayout { Spacing = 6 };
+            privStack.Add(new Label
+            {
+                Text = "JUGAR CON AMIGO (SALA PRIVADA)",
+                FontSize = 11,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = MutedTextColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            });
+            var privGrid = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Auto },
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Auto }
+                },
+                ColumnSpacing = 6
+            };
+            var createPrivBtn = CreateActionButton("Crear sala", OnCreatePrivateRoomClicked, height: 38, fontSize: 12);
+            _privateCodeInput = new Entry
+            {
+                Placeholder = "Código (ej. A7K9)",
+                PlaceholderColor = Color.FromRgb(120, 135, 160),
+                TextColor = Colors.White,
+                BackgroundColor = SurfaceColor,
+                HeightRequest = 38,
+                FontSize = 12,
+                HorizontalTextAlignment = TextAlignment.Center,
+                MaxLength = 6
+            };
+            var joinPrivBtn = CreateActionButton("Unirse", OnJoinPrivateRoomClicked, height: 38, fontSize: 12);
+            privGrid.Add(createPrivBtn, 0, 0);
+            privGrid.Add(_privateCodeInput, 1, 0);
+            privGrid.Add(joinPrivBtn, 2, 0);
+            privStack.Add(privGrid);
+            _privateRoomPanel.Content = privStack;
+            col.Add(_privateRoomPanel);
+
+            // 4C. Panel de Loading al buscar partida en línea o sala privada desde Inicio
+            _matchmakingLoadingPanel = CreateCardBorder(Color.FromRgb(25, 40, 64), ActiveMacroBorderColor, strokeThickness: 2, cornerRadius: 12, padding: new Thickness(14));
             _matchmakingLoadingPanel.IsVisible = false;
 
-            var loadingStack = new VerticalStackLayout { Spacing = 10 };
+            var loadingStack = new VerticalStackLayout { Spacing = 8 };
             _matchmakingLoadingTitleLabel = new Label
             {
-                Text = "🔍 BUSCANDO OPONENTE EN LÍNEA...",
-                FontSize = 16,
+                Text = "BUSCANDO RIVAL...",
+                FontSize = 15,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = ActiveMacroBorderColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1049,17 +1116,17 @@ namespace FractalTicTacToe.Maui
 
             _matchmakingLoadingTimerLabel = new Label
             {
-                Text = "Tiempo en cola: 00:00",
-                FontSize = 14,
+                Text = "Esperando rival (00:00)",
+                FontSize = 13,
                 TextColor = Colors.White,
                 HorizontalTextAlignment = TextAlignment.Center
             };
 
-            var cancelQueueBtn = CreateActionButton("✕ Cancelar Búsqueda", () =>
+            var cancelQueueBtn = CreateActionButton("Cancelar", () =>
             {
                 _onlineClient.CancelMatchmakingQueue();
                 UpdateLobbyModeVisibility();
-            }, height: 42, fontSize: 13);
+            }, height: 38, fontSize: 12);
 
             loadingStack.Add(_matchmakingLoadingTitleLabel);
             loadingStack.Add(_matchmakingLoadingTimerLabel);
@@ -1067,11 +1134,11 @@ namespace FractalTicTacToe.Maui
             _matchmakingLoadingPanel.Content = loadingStack;
             col.Add(_matchmakingLoadingPanel);
 
-            // 5. Regla destacada
+            // 5. Guía minimalista en 3 pasos ("Cómo jugar")
             var ruleCard = CreateCardBorder(SurfaceColor, InactiveMacroBorderColor, strokeThickness: 1, cornerRadius: 10, padding: new Thickness(10, 8));
             ruleCard.Content = new Label
             {
-                Text = "Muerte Súbita: Gana al instante quien logre el primer 3 en raya en cualquier sub-tablero. Solo las partidas En Línea suman o restan puntos de liga.",
+                Text = "Cómo jugar: 1. Tira en un cuadro verde. 2. La casilla que elijas envía a tu rival a ese cuadro. 3. Gana quien logre el primer 3 en raya.",
                 FontSize = 12,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1085,9 +1152,14 @@ namespace FractalTicTacToe.Maui
 
         private void SelectLobbyOpponentType(LobbyOpponentType type)
         {
-            if (_onlineClient.IsInQueue)
+            if (_onlineClient.IsInQueue || !string.IsNullOrEmpty(_onlineClient.PendingInviteCode))
             {
                 _onlineClient.CancelMatchmakingQueue();
+            }
+
+            if (_lobbyNoticeLabel != null)
+            {
+                _lobbyNoticeLabel.IsVisible = false;
             }
 
             _selectedOpponentType = type;
@@ -1100,40 +1172,46 @@ namespace FractalTicTacToe.Maui
             HighlightTabButton(_modeOnlineBtn, _selectedOpponentType == LobbyOpponentType.OnlineMultiplayer);
             HighlightTabButton(_modePassPlayBtn, _selectedOpponentType == LobbyOpponentType.LocalPassAndPlay);
 
-            bool isSearchingOnline = _selectedOpponentType == LobbyOpponentType.OnlineMultiplayer && _onlineClient.IsInQueue;
-            _matchmakingLoadingPanel.IsVisible = isSearchingOnline;
+            bool isWaitingOnline = _selectedOpponentType == LobbyOpponentType.OnlineMultiplayer &&
+                                   (_onlineClient.IsInQueue || !string.IsNullOrEmpty(_onlineClient.PendingInviteCode));
+            _matchmakingLoadingPanel.IsVisible = isWaitingOnline;
 
-            if (isSearchingOnline)
+            if (isWaitingOnline)
             {
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = false;
-                _lobbySection2TitleLabel.Text = "EMPAREJAMIENTO EN CURSO";
+                if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
+                _lobbySection2TitleLabel.Text = "CONECTANDO PARTIDA";
                 return;
             }
 
             if (_selectedOpponentType == LobbyOpponentType.BotMinimax)
             {
-                _lobbySection2TitleLabel.Text = "2. ELIGE LA DIFICULTAD DE LA IA (PARTIDA SIN TIEMPO)";
+                _lobbySection2TitleLabel.Text = "DIFICULTAD (SIN TIEMPO)";
                 _botDifficultyGrid.IsVisible = true;
                 _quickPairingTimeGrid.IsVisible = false;
+                if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
             }
             else if (_selectedOpponentType == LobbyOpponentType.OnlineMultiplayer)
             {
-                _lobbySection2TitleLabel.Text = "2. ELIGE EL MODO DE TIEMPO PARA BUSCAR RIVAL EN LÍNEA";
+                _lobbySection2TitleLabel.Text = "TIEMPO (EN LÍNEA)";
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = true;
+                if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = true;
             }
             else
             {
-                _lobbySection2TitleLabel.Text = "2. ELIGE EL RITMO DE RELOJ (2 JUGADORES EN ESTE TELÉFONO)";
+                _lobbySection2TitleLabel.Text = "TIEMPO (2 JUGADORES)";
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = true;
+                if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
             }
         }
 
         private void StartBotMatchWithoutClock(BotDifficulty difficulty)
         {
             TriggerSubtleHaptic();
+            if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
             _currentHintMove = null;
@@ -1148,6 +1226,7 @@ namespace FractalTicTacToe.Maui
         private async void OnTimeControlCardSelected(int timeIndex)
         {
             TriggerSubtleHaptic();
+            if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _timeControlIndex = timeIndex;
             TimeControlConfig selectedTime = TimeControls[_timeControlIndex];
             _currentHintMove = null;
@@ -1177,12 +1256,106 @@ namespace FractalTicTacToe.Maui
                 }
 
                 _onlineClient.JoinMatchmakingQueue(selectedTime);
-                _matchmakingLoadingTitleLabel.Text = $"🔍 BUSCANDO RIVAL EN {selectedTime.Name.ToUpperInvariant()}...";
+                _matchmakingLoadingTitleLabel.Text = $"BUSCANDO RIVAL ({selectedTime.Name})";
                 UpdateLobbyModeVisibility();
             }
-            catch (Exception ex)
+            catch
             {
-                _lobbySection2TitleLabel.Text = $"⚠ Servidor {_serverHost}:{DefaultServerPort} no disponible ({ex.Message})";
+                _onlineClient.CancelMatchmakingQueue();
+                UpdateLobbyModeVisibility();
+                ShowLobbyNotice("No se pudo conectar al servidor. La búsqueda fue cancelada.");
+            }
+        }
+
+        private async void OnCreatePrivateRoomClicked()
+        {
+            TriggerSubtleHaptic();
+            if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
+            TimeControlConfig selectedTime = TimeControls[_timeControlIndex];
+            _isOnlineMode = true;
+            _queueElapsedSeconds = 0.0;
+
+            try
+            {
+                if (!_onlineClient.IsConnected)
+                {
+                    string user = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
+                    string pass = !string.IsNullOrEmpty(_authenticatedPassword)
+                        ? _authenticatedPassword
+                        : (_authPasswordInput?.Text ?? string.Empty);
+                    await _onlineClient.ConnectAndLoginAsync(_serverHost, DefaultServerPort, user, pass);
+                }
+
+                _onlineClient.CreatePrivateLobby(selectedTime);
+                _matchmakingLoadingTitleLabel.Text = "CREANDO SALA PRIVADA...";
+                UpdateLobbyModeVisibility();
+            }
+            catch
+            {
+                UpdateLobbyModeVisibility();
+                ShowLobbyNotice("Servidor no disponible para crear sala privada.");
+            }
+        }
+
+        private async void OnJoinPrivateRoomClicked()
+        {
+            string code = _privateCodeInput?.Text?.Trim()?.ToUpperInvariant() ?? string.Empty;
+            if (code.Length < 4)
+            {
+                ShowLobbyNotice("Ingresa el código de 4 caracteres de tu amigo.");
+                return;
+            }
+
+            TriggerSubtleHaptic();
+            if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
+            _isOnlineMode = true;
+
+            try
+            {
+                if (!_onlineClient.IsConnected)
+                {
+                    string user = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
+                    string pass = !string.IsNullOrEmpty(_authenticatedPassword)
+                        ? _authenticatedPassword
+                        : (_authPasswordInput?.Text ?? string.Empty);
+                    await _onlineClient.ConnectAndLoginAsync(_serverHost, DefaultServerPort, user, pass);
+                }
+
+                _onlineClient.JoinPrivateLobby(code);
+            }
+            catch
+            {
+                ShowLobbyNotice("Servidor no disponible para unirse a la sala.");
+            }
+        }
+
+        private void OnOnlinePrivateLobbyCreated(string inviteCode, string timeControlCode)
+        {
+            Dispatcher.Dispatch(() =>
+            {
+                _matchmakingLoadingTitleLabel.Text = $"CÓDIGO DE SALA: {inviteCode}";
+                _matchmakingLoadingTimerLabel.Text = $"Comparte el código {inviteCode} con tu amigo ({timeControlCode})";
+                UpdateLobbyModeVisibility();
+            });
+        }
+
+        private void OnOnlineServerConnectionLost(string message)
+        {
+            Dispatcher.Dispatch(() =>
+            {
+                _isOnlineMode = false;
+                _currentHintMove = null;
+                ShowLobbyNotice(message);
+                NavigateToScreen(ScreenState.HomeLobby);
+            });
+        }
+
+        private void ShowLobbyNotice(string message)
+        {
+            if (_lobbyNoticeLabel != null)
+            {
+                _lobbyNoticeLabel.Text = message;
+                _lobbyNoticeLabel.IsVisible = !string.IsNullOrWhiteSpace(message);
             }
         }
 
@@ -1212,7 +1385,7 @@ namespace FractalTicTacToe.Maui
         }
 
         // =====================================================================
-        // PANTALLA 2: ♟ TABLERO ACTIVO (SOLO DURANTE LA PARTIDA)
+        // PANTALLA 2: TABLERO ACTIVO
         // =====================================================================
 
         private View BuildPlayArenaScreen()
@@ -1225,7 +1398,7 @@ namespace FractalTicTacToe.Maui
                     new RowDefinition { Height = GridLength.Auto }, // Banners interactivos
                     new RowDefinition { Height = GridLength.Auto }, // Estado del turno
                     new RowDefinition { Height = GridLength.Star }, // Tablero Fractal 9x9
-                    new RowDefinition { Height = GridLength.Auto }, // Telemetría
+                    new RowDefinition { Height = GridLength.Auto }, // Info jugada
                     new RowDefinition { Height = GridLength.Auto }  // Botones de acción
                 },
                 RowSpacing = 6
@@ -1253,33 +1426,33 @@ namespace FractalTicTacToe.Maui
             var bannersStack = new VerticalStackLayout { Spacing = 6 };
             _takebackOfferPanel = BuildConsentBanner(
                 LastMoveHighlightColor,
-                "Tu oponente solicita deshacer la última jugada. ¿Aceptas?",
-                "✓ Aceptar Deshacer",
+                "Tu rival pide deshacer la última jugada. ¿Aceptas?",
+                "Aceptar",
                 () => _onlineClient.RespondToOpponentTakeback(true),
-                "✕ Rechazar",
+                "Rechazar",
                 () => _onlineClient.RespondToOpponentTakeback(false),
                 out _takebackOfferLabel);
 
             _rematchOfferPanel = BuildConsentBanner(
                 ActiveMacroBorderColor,
-                "🔄 Tu oponente solicita la REVANCHA. ¿Aceptas jugar otra partida?",
-                "✓ Aceptar Revancha",
+                "Tu rival quiere jugar la revancha. ¿Aceptas?",
+                "Aceptar",
                 () => _onlineClient.RespondToOpponentRematch(true),
-                "✕ Rechazar",
+                "Rechazar",
                 () => _onlineClient.RespondToOpponentRematch(false),
                 out _rematchOfferLabel);
 
             _abortedMatchPromptPanel = BuildConsentBanner(
                 LastMoveHighlightColor,
-                "⏱ Se agotaron los 30s para el primer movimiento y la partida fue cancelada (sin cambio de puntos). ¿Quieres buscar una nueva partida?",
-                "🔍 Buscar Nueva Partida",
+                "Se agotaron los 30s para el primer movimiento. Partida cancelada sin cambio de puntos. ¿Buscar otra?",
+                "Buscar partida",
                 () =>
                 {
                     _selectedOpponentType = LobbyOpponentType.OnlineMultiplayer;
                     NavigateToScreen(ScreenState.HomeLobby);
                     OnTimeControlCardSelected(_timeControlIndex);
                 },
-                "🏠 Volver al Menú",
+                "Inicio",
                 () => NavigateToScreen(ScreenState.HomeLobby),
                 out _abortedMatchPromptLabel);
 
@@ -1305,10 +1478,10 @@ namespace FractalTicTacToe.Maui
             View boardView = CreateFractalBoardGrid(_macroBoardBorders, _cellButtons, OnCellTapped, fontSize: 16);
             arenaGrid.Add(boardView, 0, 3);
 
-            // 5. Telemetría
+            // 5. Información limpia de turno / sugerencia
             _telemetryLabel = new Label
             {
-                Text = "Movimientos: 0/81",
+                Text = "Inicio de partida",
                 FontSize = 12,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1330,10 +1503,10 @@ namespace FractalTicTacToe.Maui
                 ColumnSpacing = 6
             };
 
-            _undoButton = CreateActionButton("⟲ Deshacer", OnUndoPressed, height: 42, fontSize: 12);
-            _redoButton = CreateActionButton("⟳ Rehacer", OnRedoPressed, height: 42, fontSize: 12);
-            _hintButton = CreateActionButton("💡 Pista IA", OnHintPressed, height: 42, fontSize: 12);
-            _resignOrLeaveButton = CreateActionButton("🏳 Rendirse", OnResignOrLeavePressed, height: 42, fontSize: 12);
+            _undoButton = CreateActionButton("Deshacer", OnUndoPressed, height: 42, fontSize: 12);
+            _redoButton = CreateActionButton("Rehacer", OnRedoPressed, height: 42, fontSize: 12);
+            _hintButton = CreateActionButton("Pista", OnHintPressed, height: 42, fontSize: 12);
+            _resignOrLeaveButton = CreateActionButton("Rendirse", OnResignOrLeavePressed, height: 42, fontSize: 12);
 
             _inGameActionsRow.Add(_undoButton, 0, 0);
             _inGameActionsRow.Add(_redoButton, 1, 0);
@@ -1352,9 +1525,9 @@ namespace FractalTicTacToe.Maui
                 IsVisible = false
             };
 
-            _rematchButton = CreateActionButton("🔄 Revancha", OnRematchPressed, height: 44, fontSize: 13);
-            _analyzeFinishedMatchButton = CreateActionButton("🔍 Analizar", OnOpenCurrentMatchInAnalysisPressed, height: 44, fontSize: 13);
-            _backToMenuButton = CreateActionButton("🏠 Menú", () => NavigateToScreen(ScreenState.HomeLobby), height: 44, fontSize: 13);
+            _rematchButton = CreateActionButton("Revancha", OnRematchPressed, height: 44, fontSize: 13);
+            _analyzeFinishedMatchButton = CreateActionButton("Analizar", OnOpenCurrentMatchInAnalysisPressed, height: 44, fontSize: 13);
+            _backToMenuButton = CreateActionButton("Inicio", () => NavigateToScreen(ScreenState.HomeLobby), height: 44, fontSize: 13);
 
             _postGameActionsRow.Add(_rematchButton, 0, 0);
             _postGameActionsRow.Add(_analyzeFinishedMatchButton, 1, 0);
@@ -1369,7 +1542,7 @@ namespace FractalTicTacToe.Maui
 
         private static Border CreatePlayerCard(out Label titleLbl, out Label ratingLbl, out Label clockLbl)
         {
-            var card = CreateCardBorder(CardBgColor, PlayerXColor, strokeThickness: 2, cornerRadius: 10, padding: new Thickness(8, 5));
+            var card = CreateCardBorder(CardBgColor, PlayerXColor, strokeThickness: 1.5, cornerRadius: 10, padding: new Thickness(8, 5));
             var stack = new VerticalStackLayout { Spacing = 2 };
 
             titleLbl = new Label
@@ -1390,7 +1563,7 @@ namespace FractalTicTacToe.Maui
 
             clockLbl = new Label
             {
-                Text = "⏱ 03:00",
+                Text = "03:00",
                 FontSize = 17,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
@@ -1413,7 +1586,7 @@ namespace FractalTicTacToe.Maui
             Action onDecline,
             out Label messageLabel)
         {
-            var banner = CreateCardBorder(Color.FromRgb(36, 30, 22), borderColor, strokeThickness: 2, cornerRadius: 10, padding: new Thickness(8));
+            var banner = CreateCardBorder(Color.FromRgb(36, 30, 22), borderColor, strokeThickness: 1.5, cornerRadius: 10, padding: new Thickness(8));
             banner.IsVisible = false;
 
             var stack = new VerticalStackLayout { Spacing = 6 };
@@ -1445,7 +1618,7 @@ namespace FractalTicTacToe.Maui
         }
 
         // =====================================================================
-        // PANTALLA 3: 🎬 SALA DE ANÁLISIS (ÚLTIMA PARTIDA POR DEFECTO)
+        // PANTALLA 3: SALA DE ANÁLISIS (SOLO PARTIDAS JUGADAS + CALIDAD DE JUGADA)
         // =====================================================================
 
         private View BuildAnalysisStudioScreen()
@@ -1458,7 +1631,6 @@ namespace FractalTicTacToe.Maui
                     new RowDefinition { Height = GridLength.Auto },
                     new RowDefinition { Height = GridLength.Star },
                     new RowDefinition { Height = GridLength.Auto },
-                    new RowDefinition { Height = GridLength.Auto },
                     new RowDefinition { Height = GridLength.Auto }
                 },
                 RowSpacing = 6
@@ -1466,7 +1638,7 @@ namespace FractalTicTacToe.Maui
 
             _matchSelectorPicker = new Picker
             {
-                Title = "Selecciona una partida grabada",
+                Title = "Tus partidas jugadas",
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
                 HeightRequest = 40
@@ -1483,13 +1655,14 @@ namespace FractalTicTacToe.Maui
             };
             grid.Add(_matchSelectorPicker, 0, 0);
 
-            var evalCard = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1.5, cornerRadius: 10, padding: new Thickness(8, 5));
+            var evalCard = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1.5, cornerRadius: 10, padding: new Thickness(8, 6));
             var evalStack = new VerticalStackLayout { Spacing = 4 };
 
             _evalScoreLabel = new Label
             {
-                Text = "Evaluación Heurística: 0 (Equilibrado)",
-                FontSize = 12,
+                Text = "Partida equilibrada",
+                FontSize = 14,
+                FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 HorizontalTextAlignment = TextAlignment.Center
             };
@@ -1511,8 +1684,8 @@ namespace FractalTicTacToe.Maui
 
             _analysisStepInfoLabel = new Label
             {
-                Text = "Juega una partida para analizarla aquí paso a paso",
-                FontSize = 13,
+                Text = "Termina una partida para revisarla jugada por jugada",
+                FontSize = 12,
                 TextColor = LastMoveHighlightColor,
                 HorizontalTextAlignment = TextAlignment.Center
             };
@@ -1530,10 +1703,10 @@ namespace FractalTicTacToe.Maui
                 ColumnSpacing = 6
             };
 
-            _stepStartBtn = CreateActionButton("⏮ Inicio", () => { _replayNavigator?.JumpToStart(); RefreshAnalysisUI(); }, height: 38, fontSize: 12);
-            _stepBackBtn = CreateActionButton("◀ Ant.", () => { _replayNavigator?.StepBackward(); RefreshAnalysisUI(); }, height: 38, fontSize: 12);
-            _stepForwardBtn = CreateActionButton("Sig. ▶", () => { _replayNavigator?.StepForward(); RefreshAnalysisUI(); }, height: 38, fontSize: 12);
-            _stepEndBtn = CreateActionButton("Final ⏭", () => { _replayNavigator?.JumpToEnd(); RefreshAnalysisUI(); }, height: 38, fontSize: 12);
+            _stepStartBtn = CreateActionButton("|< Inicio", () => { _replayNavigator?.JumpToStart(); RefreshAnalysisUI(); }, height: 40, fontSize: 12);
+            _stepBackBtn = CreateActionButton("< Anterior", () => { _replayNavigator?.StepBackward(); RefreshAnalysisUI(); }, height: 40, fontSize: 12);
+            _stepForwardBtn = CreateActionButton("Siguiente >", () => { _replayNavigator?.StepForward(); RefreshAnalysisUI(); }, height: 40, fontSize: 12);
+            _stepEndBtn = CreateActionButton("Final >|", () => { _replayNavigator?.JumpToEnd(); RefreshAnalysisUI(); }, height: 40, fontSize: 12);
 
             vcrGrid.Add(_stepStartBtn, 0, 0);
             vcrGrid.Add(_stepBackBtn, 1, 0);
@@ -1541,50 +1714,12 @@ namespace FractalTicTacToe.Maui
             vcrGrid.Add(_stepEndBtn, 3, 0);
             grid.Add(vcrGrid, 0, 4);
 
-            var importGrid = new Grid
-            {
-                ColumnDefinitions =
-                {
-                    new ColumnDefinition { Width = GridLength.Star },
-                    new ColumnDefinition { Width = GridLength.Auto }
-                },
-                ColumnSpacing = 6
-            };
-
-            _transcriptInput = new Entry
-            {
-                Placeholder = "Transcripción (ej. 01-10-02-20-00)",
-                PlaceholderColor = Color.FromRgb(120, 135, 160),
-                TextColor = Colors.White,
-                BackgroundColor = SurfaceColor,
-                HeightRequest = 38,
-                FontSize = 12
-            };
-
-            var loadBtn = CreateActionButton("📥 Cargar", () =>
-            {
-                if (string.IsNullOrWhiteSpace(_transcriptInput.Text)) return;
-                try
-                {
-                    _replayNavigator = new MatchReplayNavigator(_transcriptInput.Text.Trim());
-                    RefreshAnalysisUI();
-                }
-                catch (Exception ex)
-                {
-                    _analysisStepInfoLabel.Text = $"Transcripción inválida: {ex.Message}";
-                }
-            }, height: 38, fontSize: 12);
-
-            importGrid.Add(_transcriptInput, 0, 0);
-            importGrid.Add(loadBtn, 1, 0);
-            grid.Add(importGrid, 0, 5);
-
             PopulateMatchSelectorDropdown();
             return grid;
         }
 
         // =====================================================================
-        // PANTALLA 4: 🏆 PERFIL, LIGAS Y RANKING ONLINE
+        // PANTALLA 4: PERFIL Y CLASIFICACIÓN
         // =====================================================================
 
         private View BuildProfileAndLeaguesScreen()
@@ -1592,7 +1727,7 @@ namespace FractalTicTacToe.Maui
             var scroll = new ScrollView();
             var col = new VerticalStackLayout { Spacing = 10 };
 
-            var profileCard = CreateCardBorder(CardBgColor, ActiveMacroBorderColor, strokeThickness: 2, cornerRadius: 14, padding: new Thickness(12));
+            var profileCard = CreateCardBorder(CardBgColor, ActiveMacroBorderColor, strokeThickness: 1.5, cornerRadius: 12, padding: new Thickness(12));
             var profileStack = new VerticalStackLayout { Spacing = 6 };
 
             var headerRow = new Grid
@@ -1608,23 +1743,23 @@ namespace FractalTicTacToe.Maui
 
             _profileNameLabel = new Label
             {
-                Text = "👤 Jugador (Tú)",
+                Text = "Jugador",
                 FontSize = 17,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 VerticalOptions = LayoutOptions.Center
             };
 
-            var privacyBtn = CreateActionButton("🔒 Privacidad", OnShowPrivacyPolicyClicked, height: 34, fontSize: 11);
-            var logoutBtn = CreateActionButton("🚪 Salir", OnLogoutPressed, height: 34, fontSize: 11);
+            var privacyBtn = CreateActionButton("Privacidad", OnShowPrivacyPolicyClicked, height: 34, fontSize: 11);
+            var logoutBtn = CreateActionButton("Salir", OnLogoutPressed, height: 34, fontSize: 11);
             headerRow.Add(_profileNameLabel, 0, 0);
             headerRow.Add(privacyBtn, 1, 0);
             headerRow.Add(logoutBtn, 2, 0);
 
             _profileRatingBigLabel = new Label
             {
-                Text = "1200 pts • Liga Plata (Exclusivo Online)",
-                FontSize = 16,
+                Text = "1200 pts • Liga Plata",
+                FontSize = 15,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = ActiveMacroBorderColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1632,13 +1767,13 @@ namespace FractalTicTacToe.Maui
 
             _profileStatsGridLabel = new Label
             {
-                Text = "Partidas Online: 0 | Victorias: 0 | Derrotas: 0 | Empates: 0",
+                Text = "Partidas en línea: 0 | Victorias: 0 | Derrotas: 0 | Empates: 0",
                 FontSize = 12,
                 TextColor = MutedTextColor,
                 HorizontalTextAlignment = TextAlignment.Center
             };
 
-            var deleteAccountBtn = CreateActionButton("🗑️ Eliminar Cuenta Permanentemente", OnDeleteAccountClicked, height: 36, fontSize: 12);
+            var deleteAccountBtn = CreateActionButton("Eliminar cuenta", OnDeleteAccountClicked, height: 36, fontSize: 12);
             deleteAccountBtn.BackgroundColor = Color.FromRgb(68, 28, 36);
             deleteAccountBtn.TextColor = NegativeDeltaColor;
 
@@ -1649,12 +1784,12 @@ namespace FractalTicTacToe.Maui
             profileCard.Content = profileStack;
             col.Add(profileCard);
 
-            var leaguesCard = CreateCardBorder(SurfaceColor, InactiveMacroBorderColor, strokeThickness: 1.5, cornerRadius: 12, padding: new Thickness(10));
+            var leaguesCard = CreateCardBorder(SurfaceColor, InactiveMacroBorderColor, strokeThickness: 1, cornerRadius: 12, padding: new Thickness(10));
             var leaguesStack = new VerticalStackLayout { Spacing = 3 };
             leaguesStack.Add(new Label
             {
-                Text = "🏅 ESCALAFÓN COMPETITIVO EN LÍNEA",
-                FontSize = 13,
+                Text = "LIGAS EN LÍNEA",
+                FontSize = 12,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = LastMoveHighlightColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1662,13 +1797,13 @@ namespace FractalTicTacToe.Maui
 
             string[] leagueTiers =
             {
-                "👑 Gran Maestro Fractal — 2100+ pts",
-                "🔥 Maestro — 1900 a 2099 pts",
-                "💎 Diamante — 1700 a 1899 pts",
-                "💠 Platino — 1500 a 1699 pts",
-                "🥇 Oro — 1300 a 1499 pts",
-                "🥈 Plata (Inicial) — 1100 a 1299 pts",
-                "🥉 Bronce — 100 a 1099 pts"
+                "Gran Maestro — 2100+ pts",
+                "Maestro — 1900 a 2099 pts",
+                "Diamante — 1700 a 1899 pts",
+                "Platino — 1500 a 1699 pts",
+                "Oro — 1300 a 1499 pts",
+                "Plata (Inicial) — 1100 a 1299 pts",
+                "Bronce — 100 a 1099 pts"
             };
 
             foreach (string tier in leagueTiers)
@@ -1685,7 +1820,7 @@ namespace FractalTicTacToe.Maui
             leaguesCard.Content = leaguesStack;
             col.Add(leaguesCard);
 
-            var lbCard = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 1.5, cornerRadius: 12, padding: new Thickness(10));
+            var lbCard = CreateCardBorder(CardBgColor, AccentPrimaryColor, strokeThickness: 1, cornerRadius: 12, padding: new Thickness(10));
             var lbStack = new VerticalStackLayout { Spacing = 6 };
 
             var lbHeader = new Grid
@@ -1698,13 +1833,13 @@ namespace FractalTicTacToe.Maui
             };
             lbHeader.Add(new Label
             {
-                Text = "🌐 TOP JUGADORES ONLINE",
-                FontSize = 14,
+                Text = "MEJORES JUGADORES",
+                FontSize = 13,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = Colors.White,
                 VerticalOptions = LayoutOptions.Center
             }, 0, 0);
-            lbHeader.Add(CreateActionButton("↻ Actualizar", () =>
+            lbHeader.Add(CreateActionButton("Actualizar", () =>
             {
                 if (_onlineClient.IsConnected) _onlineClient.RequestLeaderboard();
             }, height: 34, fontSize: 12), 1, 0);
@@ -1726,7 +1861,7 @@ namespace FractalTicTacToe.Maui
             _authenticatedUsername = string.Empty;
             _authenticatedPassword = string.Empty;
             if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
-            if (_authFeedbackLabel != null) _authFeedbackLabel.Text = "Sesión cerrada correctamente.";
+            if (_authFeedbackLabel != null) _authFeedbackLabel.Text = "Sesión cerrada.";
             NavigateToScreen(ScreenState.AuthScreen);
         }
 
@@ -1734,9 +1869,9 @@ namespace FractalTicTacToe.Maui
         {
             string displayUser = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Invitado";
             bool confirm = await DisplayAlert(
-                "🗑️ Eliminar Cuenta Permanentemente",
-                $"¿Estás seguro de que deseas eliminar permanentemente la cuenta '{displayUser}', tus puntos de liga y estadísticas del servidor y de este dispositivo? Esta acción no se puede deshacer.",
-                "Sí, Eliminar Cuenta",
+                "Eliminar cuenta",
+                $"¿Deseas eliminar permanentemente la cuenta '{displayUser}' y sus estadísticas?",
+                "Eliminar",
                 "Cancelar");
 
             if (!confirm)
@@ -1767,7 +1902,7 @@ namespace FractalTicTacToe.Maui
             if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
             if (_authFeedbackLabel != null)
             {
-                _authFeedbackLabel.Text = "✓ Tu cuenta y todos tus datos han sido eliminados permanentemente.";
+                _authFeedbackLabel.Text = "Cuenta eliminada.";
                 _authFeedbackLabel.TextColor = PositiveDeltaColor;
             }
             NavigateToScreen(ScreenState.AuthScreen);
@@ -1782,7 +1917,7 @@ namespace FractalTicTacToe.Maui
                 _authenticatedPassword = string.Empty;
                 if (_authFeedbackLabel != null)
                 {
-                    _authFeedbackLabel.Text = $"✓ Cuenta '{deletedUsername}' eliminada permanentemente del servidor.";
+                    _authFeedbackLabel.Text = $"Cuenta '{deletedUsername}' eliminada.";
                     _authFeedbackLabel.TextColor = PositiveDeltaColor;
                 }
                 NavigateToScreen(ScreenState.AuthScreen);
@@ -1799,6 +1934,11 @@ namespace FractalTicTacToe.Maui
 
             if (_isOnlineMode)
             {
+                if (!_onlineClient.IsConnected)
+                {
+                    _onlineClient.HandleUnexpectedServerDisconnect();
+                    return;
+                }
                 if (_onlineClient.TrySendMove(boardIndex, cellIndex))
                 {
                     TriggerSubtleHaptic();
@@ -1828,7 +1968,7 @@ namespace FractalTicTacToe.Maui
             {
                 if (_onlineClient.RequestTakeback())
                 {
-                    _telemetryLabel.Text = "Solicitud para deshacer enviada. El oponente debe aceptarla.";
+                    _telemetryLabel.Text = "Solicitud enviada a tu rival.";
                 }
                 return;
             }
@@ -1853,9 +1993,7 @@ namespace FractalTicTacToe.Maui
             _hintButton.IsEnabled = false;
             MinimaxSearchResult hint = await _localSession.RequestHintAsync();
             _currentHintMove = hint.BestMove;
-            _telemetryLabel.Text =
-                $"Pista IA: Tablero {hint.BestMove.BoardIndex}, Celda {hint.BestMove.CellIndex} " +
-                $"(Eval {hint.Score}, Prof. {hint.MaxDepthReached}, {hint.ElapsedMs} ms)";
+            _telemetryLabel.Text = $"Sugerencia: Cuadro {hint.BestMove.BoardIndex + 1}, Casilla {hint.BestMove.CellIndex + 1}";
             _hintButton.IsEnabled = true;
             RefreshUI();
         }
@@ -1864,6 +2002,11 @@ namespace FractalTicTacToe.Maui
         {
             if (_isOnlineMode)
             {
+                if (!_onlineClient.IsConnected)
+                {
+                    _onlineClient.HandleUnexpectedServerDisconnect();
+                    return;
+                }
                 if (_onlineClient.IsInActiveMatch)
                 {
                     _onlineClient.ResignMatch();
@@ -1930,7 +2073,7 @@ namespace FractalTicTacToe.Maui
 
             if (_recordedMatches.Count == 0)
             {
-                _matchSelectorPicker.Items.Add("Sin partidas registradas aún en esta sesión");
+                _matchSelectorPicker.Items.Add("Sin partidas jugadas aún");
                 _matchSelectorPicker.SelectedIndex = 0;
                 _suppressPickerEvent = false;
                 return;
@@ -1940,8 +2083,8 @@ namespace FractalTicTacToe.Maui
             {
                 MatchRecord m = _recordedMatches[i];
                 string winnerTag = m.Winner == Player.None ? "Empate" : $"Ganó {m.Winner}";
-                string latestTag = i == 0 ? " [Última Partida]" : "";
-                _matchSelectorPicker.Items.Add($"#{i + 1}{latestTag}: {m.PlayerXName} vs {m.PlayerOName} ({winnerTag})");
+                string latestTag = i == 0 ? " (Última)" : "";
+                _matchSelectorPicker.Items.Add($"#{i + 1}{latestTag}: {m.PlayerXName} vs {m.PlayerOName} • {winnerTag}");
             }
 
             _matchSelectorPicker.SelectedIndex = 0;
@@ -1957,12 +2100,16 @@ namespace FractalTicTacToe.Maui
 
                 if (_currentScreen == ScreenState.AuthScreen)
                 {
-                    _authFeedbackLabel.Text = $"⚠ {errorMsg}";
+                    _authFeedbackLabel.Text = errorMsg;
                     _authFeedbackLabel.TextColor = NegativeDeltaColor;
+                }
+                else if (_currentScreen == ScreenState.HomeLobby)
+                {
+                    ShowLobbyNotice(errorMsg);
                 }
                 else if (_telemetryLabel != null)
                 {
-                    _telemetryLabel.Text = $"Servidor: {errorMsg}";
+                    _telemetryLabel.Text = errorMsg;
                 }
             });
         }
@@ -2009,13 +2156,13 @@ namespace FractalTicTacToe.Maui
             string onlineRank = EloRatingCalculator.GetRankTitle(onlineRating);
 
             _topHeaderSubtitleLabel.Text = _currentScreen == ScreenState.AuthScreen
-                ? $"Acceso de Cuenta • Servidor {_serverHost}:{DefaultServerPort}"
-                : $"👤 {displayUser} • {onlineRating} pts ({onlineRank})";
+                ? $"Servidor {_serverHost}:{DefaultServerPort}"
+                : $"{displayUser} • {onlineRating} pts ({onlineRank})";
 
-            _lobbyProfileSummaryLabel.Text = $"👤 Usuario: {displayUser}";
+            _lobbyProfileSummaryLabel.Text = displayUser;
             _lobbyLeagueBadgeLabel.Text =
-                $"Clasificación Online: {onlineRating} pts (Liga {onlineRank}) • " +
-                $"{_onlineClient.LocalWins}V - {_onlineClient.LocalLosses}D - {_onlineClient.LocalDraws}E";
+                $"{onlineRating} pts • Liga {onlineRank} • " +
+                $"{_onlineClient.LocalWins}V {_onlineClient.LocalLosses}D {_onlineClient.LocalDraws}E";
 
             UpdateLobbyModeVisibility();
 
@@ -2053,7 +2200,7 @@ namespace FractalTicTacToe.Maui
             _rightPlayerCard.Stroke = new SolidColorBrush(oppColor);
 
             string myName = !string.IsNullOrEmpty(_onlineClient.LocalUsername) ? _onlineClient.LocalUsername : _authenticatedUsername;
-            string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Oponente";
+            string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Rival";
 
             int? myDelta = null;
             int? oppDelta = null;
@@ -2082,7 +2229,7 @@ namespace FractalTicTacToe.Maui
             _rematchOfferPanel.IsVisible = state.IsGameOver && _onlineClient.HasOpponentOfferedRematch;
             if (_onlineClient.HasOpponentOfferedRematch)
             {
-                _rematchOfferLabel.Text = $"🔄 {oppName} [{oppRole}] solicita la REVANCHA. ¿Aceptas jugar otra partida?";
+                _rematchOfferLabel.Text = $"{oppName} quiere jugar la revancha. ¿Aceptas?";
             }
 
             if (state.IsGameOver)
@@ -2090,40 +2237,38 @@ namespace FractalTicTacToe.Maui
                 string reasonText = FormatEndReason(_onlineClient.LastEndReason);
                 if (isAbortedFirstMove)
                 {
-                    _statusBannerLabel.Text = "⚠ PARTIDA CANCELADA (Sin primer movimiento en 30s) • Sin cambio de puntos";
+                    _statusBannerLabel.Text = "Partida cancelada • Sin cambio de puntos";
                 }
                 else if (state.Winner == myRole)
                 {
-                    _statusBannerLabel.Text = $"🏆 ¡VICTORIA ({reasonText})! Ganaste con [{myRole}]";
+                    _statusBannerLabel.Text = $"Ganaste ({reasonText})";
                 }
                 else if (state.Winner == oppRole)
                 {
-                    _statusBannerLabel.Text = $"DERROTA ({reasonText}) • Ganó {oppName} [{oppRole}]";
+                    _statusBannerLabel.Text = $"Ganó {oppName} ({reasonText})";
                 }
                 else
                 {
-                    _statusBannerLabel.Text = $"¡EMPATE GLOBAL ({reasonText})!";
+                    _statusBannerLabel.Text = $"Empate ({reasonText})";
                 }
             }
             else if (_onlineClient.IsWaitingForOpponentTakebackResponse)
             {
-                _statusBannerLabel.Text = "Esperando que tu oponente acepte o rechace deshacer la jugada...";
+                _statusBannerLabel.Text = "Esperando respuesta de tu rival...";
             }
             else
             {
                 bool isMyTurn = state.CurrentPlayer == myRole;
-                string turnText = isMyTurn ? $"¡TU TURNO [{myRole}]!" : $"Turno de {oppName} [{oppRole}]";
+                string turnText = isMyTurn ? $"Tu turno [{myRole}]" : $"Turno de {oppName} [{oppRole}]";
                 string boardText = state.ActiveBoardIndex == GameState.FreeMoveBoardIndex
-                    ? "TIRO LIBRE"
-                    : $"TABLERO FORZADO #{state.ActiveBoardIndex}";
+                    ? "Tiro libre"
+                    : $"Cuadro {state.ActiveBoardIndex + 1}";
                 _statusBannerLabel.Text = $"{turnText} • {boardText}";
             }
 
             if (_onlineClient.HasIncomingTakebackOffer)
             {
-                _takebackOfferLabel.Text =
-                    $"⚠ {oppName} [{_onlineClient.IncomingTakebackRequester}] pide permiso para deshacer " +
-                    $"{_onlineClient.IncomingTakebackPlies} medio(s) turno(s). ¿Aceptas?";
+                _takebackOfferLabel.Text = $"{oppName} pide deshacer la última jugada. ¿Aceptas?";
             }
 
             bool allowTap = _onlineClient.IsInActiveMatch &&
@@ -2139,37 +2284,37 @@ namespace FractalTicTacToe.Maui
 
             if (!state.IsGameOver)
             {
-                _undoButton.Text = "⟲ Deshacer";
-                _undoButton.IsEnabled = !_onlineClient.IsInActiveMatch ||
-                                        !state.CanUndo ||
-                                        _onlineClient.HasIncomingTakebackOffer ||
-                                        _onlineClient.IsWaitingForOpponentTakebackResponse ? false : true;
+                _undoButton.Text = "Deshacer";
+                _undoButton.IsEnabled = _onlineClient.IsInActiveMatch &&
+                                        state.CanUndo &&
+                                        !_onlineClient.HasIncomingTakebackOffer &&
+                                        !_onlineClient.IsWaitingForOpponentTakebackResponse;
                 _redoButton.IsVisible = false;
                 _hintButton.IsVisible = false;
-                _resignOrLeaveButton.Text = state.MoveCount == 0 ? "✕ Cancelar" : "🏳 Rendirse";
+                _resignOrLeaveButton.Text = state.MoveCount == 0 ? "Cancelar" : "Rendirse";
                 _resignOrLeaveButton.IsEnabled = _onlineClient.IsInActiveMatch;
             }
             else
             {
                 if (_onlineClient.RematchDeclinedByOpponent)
                 {
-                    _rematchButton.Text = "✕ Rechazada";
+                    _rematchButton.Text = "Rechazada";
                     _rematchButton.IsEnabled = false;
-                    _telemetryLabel.Text = $"{oppName} rechazó la solicitud de revancha.";
+                    _telemetryLabel.Text = $"{oppName} rechazó la revancha.";
                 }
                 else if (_onlineClient.HasRequestedRematch)
                 {
-                    _rematchButton.Text = "⏳ Esperando...";
+                    _rematchButton.Text = "Esperando...";
                     _rematchButton.IsEnabled = false;
                 }
                 else if (_onlineClient.HasOpponentOfferedRematch)
                 {
-                    _rematchButton.Text = "✓ Aceptar Rev.";
+                    _rematchButton.Text = "Aceptar";
                     _rematchButton.IsEnabled = true;
                 }
                 else
                 {
-                    _rematchButton.Text = "🔄 Revancha";
+                    _rematchButton.Text = "Revancha";
                     _rematchButton.IsEnabled = true;
                 }
 
@@ -2197,14 +2342,14 @@ namespace FractalTicTacToe.Maui
             _leftPlayerCard.Stroke = new SolidColorBrush(myColor);
             _rightPlayerCard.Stroke = new SolidColorBrush(oppColor);
 
-            _leftPlayerTitleLabel.Text = $"[{myRole}] {myProfile.Username} (Tú)";
+            _leftPlayerTitleLabel.Text = $"[{myRole}] {myProfile.Username}";
             _leftPlayerTitleLabel.TextColor = myColor;
-            _leftPlayerRatingLabel.Text = isVsAi ? "Partida vs IA (Sin puntos)" : "Jugador Local 1 (Sin puntos)";
+            _leftPlayerRatingLabel.Text = isVsAi ? "Contra IA" : "Jugador 1";
             _leftPlayerRatingLabel.TextColor = MutedTextColor;
 
-            _rightPlayerTitleLabel.Text = $"[{oppRole}] {oppProfile.Username}";
+            _rightPlayerTitleLabel.Text = $"[{oppRole}] {(isVsAi ? "IA" : oppProfile.Username)}";
             _rightPlayerTitleLabel.TextColor = oppColor;
-            _rightPlayerRatingLabel.Text = isVsAi ? $"IA Nivel {_localSession.BotDifficulty}" : "Jugador Local 2 (Sin puntos)";
+            _rightPlayerRatingLabel.Text = isVsAi ? FormatDifficultyLabel(_localSession.BotDifficulty) : "Jugador 2";
             _rightPlayerRatingLabel.TextColor = MutedTextColor;
 
             bool hasClock = !_localSession.Clock.Config.IsUntimed;
@@ -2213,34 +2358,28 @@ namespace FractalTicTacToe.Maui
 
             if (state.IsGameOver)
             {
-                string reasonText = FormatEndReason(_localSession.LastEndReason);
                 _statusBannerLabel.Text = state.Winner != Player.None
-                    ? $"🏆 ¡FIN DE PARTIDA ({reasonText})! GANADOR: [{state.Winner}]"
-                    : "¡EMPATE GLOBAL! Las 81 casillas están llenas.";
+                    ? $"Ganador: [{state.Winner}]"
+                    : "Empate";
             }
             else if (_localSession.IsBotThinking)
             {
-                _statusBannerLabel.Text = $"Bot Minimax [{state.CurrentPlayer}] calculando jugada...";
+                _statusBannerLabel.Text = "Turno de la IA...";
             }
             else if (state.ActiveBoardIndex == GameState.FreeMoveBoardIndex)
             {
-                _statusBannerLabel.Text = $"Turno de [{state.CurrentPlayer}] • TIRO LIBRE (Cualquier sub-tablero en verde)";
+                _statusBannerLabel.Text = $"Turno de [{state.CurrentPlayer}] • Tiro libre";
             }
             else
             {
-                _statusBannerLabel.Text = $"Turno de [{state.CurrentPlayer}] • TABLERO FORZADO #{state.ActiveBoardIndex}";
+                _statusBannerLabel.Text = $"Turno de [{state.CurrentPlayer}] • Cuadro {state.ActiveBoardIndex + 1}";
             }
 
-            if (_localSession.LastBotSearchResult.HasValue)
+            if (!_currentHintMove.HasValue)
             {
-                MinimaxSearchResult r = _localSession.LastBotSearchResult.Value;
-                _telemetryLabel.Text =
-                    $"IA: {r.BestMove} | Eval: {r.Score} | Prof: {r.MaxDepthReached} | " +
-                    $"Nodos: {r.NodesEvaluated:N0} | {r.ElapsedMs} ms";
-            }
-            else if (!_currentHintMove.HasValue)
-            {
-                _telemetryLabel.Text = $"Movimientos: {state.MoveCount}/81";
+                _telemetryLabel.Text = state.MoveCount == 0
+                    ? "Tira en cualquier casilla para empezar"
+                    : $"Jugada {state.MoveCount}";
             }
 
             bool allowTap = !state.IsGameOver && !_localSession.IsBotThinking && !_localSession.IsCurrentTurnBot();
@@ -2251,21 +2390,33 @@ namespace FractalTicTacToe.Maui
 
             if (!state.IsGameOver)
             {
-                _undoButton.Text = "⟲ Deshacer";
+                _undoButton.Text = "Deshacer";
                 _undoButton.IsEnabled = !_localSession.IsBotThinking && state.CanUndo;
                 _redoButton.IsVisible = true;
                 _redoButton.IsEnabled = !_localSession.IsBotThinking && state.CanRedo;
                 _hintButton.IsVisible = isVsAi;
                 _hintButton.IsEnabled = isVsAi && !_localSession.IsBotThinking && !_localSession.IsCurrentTurnBot();
-                _resignOrLeaveButton.Text = "🏠 Salir";
+                _resignOrLeaveButton.Text = "Salir";
                 _resignOrLeaveButton.IsEnabled = true;
             }
             else
             {
-                _rematchButton.Text = "🔄 Revancha";
+                _rematchButton.Text = "Revancha";
                 _rematchButton.IsEnabled = true;
                 _analyzeFinishedMatchButton.IsVisible = state.MoveCount > 0;
                 _analyzeFinishedMatchButton.IsEnabled = state.MoveCount > 0;
+            }
+        }
+
+        private static string FormatDifficultyLabel(BotDifficulty diff)
+        {
+            switch (diff)
+            {
+                case BotDifficulty.Easy: return "Fácil";
+                case BotDifficulty.Medium: return "Medio";
+                case BotDifficulty.Hard: return "Difícil";
+                case BotDifficulty.Master: return "Maestro";
+                default: return "Difícil";
             }
         }
 
@@ -2276,8 +2427,9 @@ namespace FractalTicTacToe.Maui
                 var emptyState = new GameState();
                 RenderBoardOnGrid(emptyState, null, false, _analysisMacroBorders, _analysisCellButtons);
                 _evalScoreLabel.Text = "Sin partida seleccionada";
+                _evalScoreLabel.TextColor = Colors.White;
                 _evalProgressBar.Progress = 0.5;
-                _analysisStepInfoLabel.Text = "Termina una partida para analizarla aquí paso a paso";
+                _analysisStepInfoLabel.Text = "Termina una partida para revisarla jugada por jugada";
                 _stepStartBtn.IsEnabled = false;
                 _stepBackBtn.IsEnabled = false;
                 _stepForwardBtn.IsEnabled = false;
@@ -2291,42 +2443,52 @@ namespace FractalTicTacToe.Maui
             RenderBoardOnGrid(state, lastMove, false, _analysisMacroBorders, _analysisCellButtons);
 
             int eval = _replayNavigator.GetCurrentEvaluationForX();
-            string evalText;
+            string posStatus = _replayNavigator.GetCurrentPositionStatus();
             double barProgress;
 
             if (eval >= MinimaxBot.WinScore - 500)
             {
-                evalText = "Evaluación: ¡VICTORIA POR MUERTE SÚBITA PARA [X]!";
                 barProgress = 1.0;
             }
             else if (eval <= -MinimaxBot.WinScore + 500)
             {
-                evalText = "Evaluación: ¡VICTORIA POR MUERTE SÚBITA PARA [O]!";
                 barProgress = 0.0;
             }
             else
             {
-                string sign = eval > 0 ? "+" : "";
-                evalText = $"Evaluación Táctica (perspectiva X): {sign}{eval}";
-                barProgress = Math.Clamp(0.5 + (eval / 1200.0), 0.05, 0.95);
+                barProgress = Math.Clamp(0.5 + (eval / 2400.0), 0.08, 0.92);
             }
 
-            _evalScoreLabel.Text = evalText;
             _evalProgressBar.Progress = barProgress;
 
             if (lastMove.HasValue)
             {
                 Player mover = state.CurrentPlayer == Player.X ? Player.O : Player.X;
+                string moveQuality = _replayNavigator.GetCurrentMoveQuality(out string explanation);
+
+                _evalScoreLabel.Text = $"{moveQuality} • {posStatus}";
+                if (moveQuality == "Jugada ganadora" || moveQuality == "Muy buen movimiento" || moveQuality == "Buen movimiento")
+                {
+                    _evalScoreLabel.TextColor = PositiveDeltaColor;
+                }
+                else if (moveQuality == "Error grave" || moveQuality == "Mal movimiento")
+                {
+                    _evalScoreLabel.TextColor = NegativeDeltaColor;
+                }
+                else
+                {
+                    _evalScoreLabel.TextColor = LastMoveHighlightColor;
+                }
+
                 _analysisStepInfoLabel.Text =
-                    $"Jugada {_replayNavigator.CurrentPly}/{_replayNavigator.TotalPlies}: " +
-                    $"[{mover}] tiró en Tablero #{lastMove.Value.BoardIndex}, Casilla #{lastMove.Value.CellIndex}";
+                    $"Jugada {_replayNavigator.CurrentPly}/{_replayNavigator.TotalPlies} ([{mover}]): {explanation}";
             }
             else
             {
-                _analysisStepInfoLabel.Text = $"Posición Inicial (0/{_replayNavigator.TotalPlies}) • Tiro Libre";
+                _evalScoreLabel.Text = posStatus;
+                _evalScoreLabel.TextColor = Colors.White;
+                _analysisStepInfoLabel.Text = $"Inicio (0/{_replayNavigator.TotalPlies}) • Avanza con los botones";
             }
-
-            _transcriptInput.Text = GameSerializer.ExportMoveHistory(state);
 
             _stepStartBtn.IsEnabled = _replayNavigator.CanStepBackward;
             _stepBackBtn.IsEnabled = _replayNavigator.CanStepBackward;
@@ -2345,11 +2507,11 @@ namespace FractalTicTacToe.Maui
             int totalOnline = wins + losses + draws;
             double winRate = totalOnline == 0 ? 0.0 : (wins * 100.0) / totalOnline;
 
-            _profileNameLabel.Text = $"👤 {name} (Tú)";
-            _profileRatingBigLabel.Text = $"{rating} pts • Liga {rank} (Clasificación Online)";
+            _profileNameLabel.Text = name;
+            _profileRatingBigLabel.Text = $"{rating} pts • Liga {rank}";
             _profileStatsGridLabel.Text =
-                $"Partidas Online: {totalOnline} | Victorias: {wins} | Derrotas: {losses} | Empates: {draws}\n" +
-                $"Efectividad Online: {winRate:F1}% | Partidas en Sala de Análisis: {_recordedMatches.Count}";
+                $"En línea: {totalOnline} | Victorias: {wins} | Derrotas: {losses} | Empates: {draws}\n" +
+                $"Efectividad: {winRate:F0}% | Partidas guardadas: {_recordedMatches.Count}";
         }
 
         private void UpdateClockLabels()
@@ -2368,14 +2530,13 @@ namespace FractalTicTacToe.Maui
             double mySeconds = clock.GetRemainingSeconds(myRole);
             double oppSeconds = clock.GetRemainingSeconds(oppRole);
 
-            _leftClockLabel.Text = $"⏱ {MatchClock.FormatClock(mySeconds)}";
-            _rightClockLabel.Text = $"⏱ {MatchClock.FormatClock(oppSeconds)}";
+            _leftClockLabel.Text = MatchClock.FormatClock(mySeconds);
+            _rightClockLabel.Text = MatchClock.FormatClock(oppSeconds);
 
             if (_isOnlineMode && !state.IsGameOver && clock.IsWaitingForFirstMove)
             {
                 int secsLeft = (int)Math.Ceiling(clock.FirstMoveSecondsRemaining);
-                _telemetryLabel.Text =
-                    $"⏳ {secsLeft}s para realizar el primer movimiento (o la partida se cancelará sin cambio de puntos)";
+                _telemetryLabel.Text = $"{secsLeft}s para hacer el primer tiro";
             }
 
             bool myClockActive = !state.IsGameOver && !clock.IsWaitingForFirstMove && state.CurrentPlayer == myRole;

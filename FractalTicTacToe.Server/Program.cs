@@ -195,6 +195,32 @@ namespace FractalTicTacToe.Server
                     Console.WriteLine($"[COLA CANCELADA] {sender.Username} salió de la cola de búsqueda.");
                     break;
 
+                case MultiplayerProtocol.CmdCreatePrivate:
+                    if (!EnsureAuthenticated(sender)) return;
+                    TimeControlConfig privateTc = parts.Length >= 2
+                        ? TimeControlConfig.FromCode(parts[1])
+                        : TimeControlConfig.Blitz3Plus2;
+                    string inviteCode = Matchmaking.CreatePrivateLobby(sender.PlayerId, privateTc);
+                    sender.Send(MultiplayerProtocol.BuildPrivateCreated(inviteCode, privateTc.ToCode()));
+                    Console.WriteLine($"[SALA PRIVADA] {sender.Username} creó la sala '{inviteCode}' ({privateTc.Name}).");
+                    break;
+
+                case MultiplayerProtocol.CmdJoinPrivate:
+                    if (!EnsureAuthenticated(sender)) return;
+                    if (parts.Length < 2 || string.IsNullOrWhiteSpace(parts[1]))
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError("Ingresa el código de la sala privada."));
+                        return;
+                    }
+                    OnlineMatchRoom privateRoom = Matchmaking.JoinPrivateLobby(sender.PlayerId, parts[1], out string joinErr);
+                    if (privateRoom == null)
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError(joinErr));
+                        return;
+                    }
+                    BindRoomEventsAndNotifyStart(privateRoom);
+                    break;
+
                 case MultiplayerProtocol.CmdMove:
                     if (!EnsureAuthenticated(sender)) return;
                     if (parts.Length < 4 ||

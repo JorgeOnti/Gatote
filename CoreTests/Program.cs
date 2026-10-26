@@ -33,8 +33,11 @@ namespace CoreTests
             RunTest("19. Reloj de Partida con Incremento Fischer y Derrota por Tiempo", TestMatchClockFischerIncrementAndWinningLine);
             RunTest("20. Navegador de Repeticiones y Sala de Análisis (MatchReplayNavigator)", TestMatchReplayNavigatorStepByStep);
             RunTest("21. Cumplimiento de Tiendas (DELETE_ACCOUNT, Privacidad y Audio PCM)", TestStoreComplianceAccountDeletionAndSoundSynthesizer);
+            RunTest("22. Minimax: Redirección Multi-Tablero, Auto-Redirección y Trampas", TestMinimaxMultiBoardRedirectionLookaheadAndTraps);
+            RunTest("23. Clasificación Humana de Jugadas en Sala de Análisis", TestHumanReadableMoveQualityAndAnalysisLabels);
+            RunTest("24. Caída de Servidor sin Congelamiento y Salas Privadas por Código", TestServerCrashGracefulCancelAndPrivateRoomCode);
 
-            Console.WriteLine("\n✔ ¡Las 21 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
+            Console.WriteLine("\n✔ ¡Las 24 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
             return 0;
         }
 
@@ -659,6 +662,114 @@ namespace CoreTests
             Assert(!string.IsNullOrWhiteSpace(SoundEffectsSynthesizer.PrivacyPolicyInAppText) &&
                    SoundEffectsSynthesizer.PrivacyPolicyInAppText.Contains("Eliminar Cuenta"),
                    "El texto de Política de Privacidad integrado debe documentar la eliminación de cuenta.");
+        }
+
+        private static void TestMinimaxMultiBoardRedirectionLookaheadAndTraps()
+        {
+            // Caso 1: El humano (X) ya tiene 2 en raya o 2 piezas peligrosas en varios sub-tableros (1, 2, 3, 5, 6, 7, 8).
+            // El bot (O) está forzado a tirar en el sub-tablero 4. Solo enviar al sub-tablero 0 es seguro.
+            var cells = new Player[81];
+            foreach (int dangerBoard in new[] { 1, 2, 3, 5, 6, 7, 8 })
+            {
+                cells[dangerBoard * 9 + 0] = Player.X;
+                cells[dangerBoard * 9 + 4] = Player.X; // Amenaza diagonal 0-4-8 para X
+            }
+
+            // Además, en el tablero 4 (donde tira O), si O jugara la celda 4 (auto-redirección 4->4),
+            // supongamos que X también tiene 4*9+1 y 4*9+2 (amenaza 0-1-2 en el propio tablero 4).
+            cells[4 * 9 + 1] = Player.X;
+            cells[4 * 9 + 2] = Player.X;
+
+            var state = new GameState();
+            state.LoadFromSnapshot(cells, Player.O, activeBoardIndex: 4, isGameOver: false, winner: Player.None);
+
+            foreach (BotDifficulty diff in new[] { BotDifficulty.Easy, BotDifficulty.Medium, BotDifficulty.Hard, BotDifficulty.Master })
+            {
+                var bot = new MinimaxBot(diff);
+                Move chosen = bot.GetBestMove(state);
+                Assert(chosen.BoardIndex == 4 && chosen.CellIndex == 0,
+                    $"En dificultad {diff}, la IA debe elegir (4,0) para bloquear a X en el tablero 4 y enviarlo al único tablero seguro #0, pero eligió {chosen}.");
+            }
+
+            // Caso 2: Evitar enviar al rival a un sub-tablero donde ya tiene 2 piezas armadas (aunque aún no sean 2 en raya directo)
+            // cuando existe un sub-tablero completamente vacío.
+            var setupCells = new Player[81];
+            setupCells[2 * 9 + 0] = Player.X;
+            setupCells[2 * 9 + 7] = Player.X;
+            var setupState = new GameState();
+            setupState.LoadFromSnapshot(setupCells, Player.O, activeBoardIndex: 4, isGameOver: false, winner: Player.None);
+
+            var hardBot = new MinimaxBot(BotDifficulty.Hard);
+            Move safeSetupMove = hardBot.GetBestMove(setupState);
+            Assert(safeSetupMove.CellIndex != 2,
+                $"La IA debe evitar enviar a X al sub-tablero 2 donde X ya tiene 2 piezas armadas (eligió {safeSetupMove}).");
+        }
+
+        private static void TestHumanReadableMoveQualityAndAnalysisLabels()
+        {
+            var pX = new PlayerProfile("x", "JugadorX", 1200);
+            var pO = new PlayerProfile("o", "JugadorO", 1200);
+            // Transcripción donde X gana en el movimiento 5: 01-10-02-20-00
+            // Nota: en el turno 4, O juega (2,0) que envía a X de regreso al tablero 0 donde X ya tiene (0,1) y (0,2) -> Error grave de O
+            GameState game = GameSerializer.ImportMoveHistory("01-10-02-20-00");
+            MatchRecord rec = MatchRecord.CreateFromGame(game, pX, pO);
+            var nav = new MatchReplayNavigator(rec);
+
+            // En el movimiento 5/5 (victoria de X con 0,0)
+            string finalQuality = nav.GetCurrentMoveQuality(out string finalExplanation);
+            Assert(finalQuality == "Jugada ganadora", $"El último tiro ganador debe clasificarse como 'Jugada ganadora', fue '{finalQuality}'.");
+            Assert(!string.IsNullOrWhiteSpace(finalExplanation), "Debe incluir explicación en español sencillo.");
+            Assert(nav.GetCurrentPositionStatus().Contains("Victoria"), "El estado final debe indicar Victoria.");
+
+            // En el movimiento 4/5 (O jugó 2,0 enviando a X al tablero 0 donde X tenía 2 en línea)
+            nav.JumpToPly(4);
+            string blunderQuality = nav.GetCurrentMoveQuality(out string blunderExplanation);
+            Assert(blunderQuality == "Error grave", $"Enviar al rival a un tablero donde gana en 1 turno debe ser 'Error grave', fue '{blunderQuality}' ({blunderExplanation}).");
+
+            // En el movimiento 1/5 (apertura normal de X)
+            nav.JumpToPly(1);
+            string openingQuality = nav.GetCurrentMoveQuality(out _);
+            Assert(openingQuality == "Muy buen movimiento" || openingQuality == "Buen movimiento",
+                $"Una apertura segura debe clasificarse como buen o muy buen movimiento, fue '{openingQuality}'.");
+        }
+
+        private static void TestServerCrashGracefulCancelAndPrivateRoomCode()
+        {
+            // 1. Verificar Salas Privadas con código de 4 caracteres en MatchmakingService
+            var mm = new MatchmakingService();
+            mm.RegisterAccount("HostUser", "pass123", out PlayerProfile host, out _);
+            mm.RegisterAccount("GuestUser", "pass123", out PlayerProfile guest, out _);
+            host.EloRating = 1350;
+
+            string code = mm.CreatePrivateLobby(host.PlayerId, TimeControlConfig.Rapid5Plus0);
+            Assert(!string.IsNullOrEmpty(code) && code.Length == 4, $"El código de sala privada debe tener 4 caracteres, fue '{code}'.");
+
+            OnlineMatchRoom room = mm.JoinPrivateLobby(guest.PlayerId, code.ToLowerInvariant(), out string joinErr);
+            Assert(room != null && string.IsNullOrEmpty(joinErr), $"GuestUser debe poder unirse con el código '{code}' ({joinErr}).");
+            Assert(room.TimeControl.InitialSeconds == 300, "La sala privada debe respetar el modo de tiempo del anfitrión (5+0).");
+
+            // 2. Verificar que si el servidor se cae a mitad de partida, el cliente cancela la partida sin puntos y dispara ServerConnectionLost
+            using (var client = new OnlineMultiplayerClient())
+            {
+                client.ProcessServerPacket(MultiplayerProtocol.BuildAuthOk(host));
+                client.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(room, Player.X));
+                room.SubmitMove(room.PlayerX.PlayerId, new Move(4, 4), out _);
+                client.ProcessServerPacket(MultiplayerProtocol.BuildStateSync(room, new Move(4, 4)));
+
+                Assert(client.IsInActiveMatch, "El cliente debe estar en partida activa antes de la caída del servidor.");
+
+                string disconnectMessage = null;
+                client.ServerConnectionLost += msg => disconnectMessage = msg;
+
+                client.HandleUnexpectedServerDisconnect();
+
+                Assert(!client.IsInActiveMatch, "Al caerse el servidor, IsInActiveMatch debe pasar a false inmediatamente.");
+                Assert(!client.IsInQueue, "Al caerse el servidor, IsInQueue debe ser false.");
+                Assert(client.LastEndReason == MatchEndReason.Aborted, "La partida interrumpida por caída del servidor debe quedar Aborted.");
+                Assert(!client.LastRatingUpdate.HasValue, "Nadie debe ganar ni perder puntos cuando el servidor se cae.");
+                Assert(client.LocalElo == 1350, "El puntaje del jugador debe permanecer intacto (1350).");
+                Assert(!string.IsNullOrEmpty(disconnectMessage), "Debe disparar el evento ServerConnectionLost con un mensaje para redirigir a Inicio.");
+            }
         }
 
         private static string BuildFenFromCells(Player[] cells, Player turn, int activeBoard)

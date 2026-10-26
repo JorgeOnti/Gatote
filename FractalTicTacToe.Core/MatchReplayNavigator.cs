@@ -11,6 +11,8 @@ namespace FractalTicTacToe.Core
     {
         private readonly List<Move> _allMoves;
         private readonly GameState _workingState;
+        private readonly Dictionary<int, (string Quality, string Explanation)> _cachedMoveQualityByPly =
+            new Dictionary<int, (string Quality, string Explanation)>();
 
         public MatchRecord SourceRecord { get; private set; }
         public GameState CurrentState => _workingState;
@@ -68,6 +70,7 @@ namespace FractalTicTacToe.Core
             }
 
             _allMoves.Clear();
+            _cachedMoveQualityByPly.Clear();
             _workingState.Reset();
 
             foreach (Move move in moves)
@@ -165,6 +168,44 @@ namespace FractalTicTacToe.Core
             }
 
             return MinimaxBot.EvaluateState(_workingState, Player.X);
+        }
+
+        /// <summary>
+        /// Devuelve una descripción clara del estado actual de la posición ("Partida equilibrada", "Ventaja clara para X", etc.).
+        /// </summary>
+        public string GetCurrentPositionStatus()
+        {
+            return MinimaxBot.DescribePositionStatus(_workingState, GetCurrentEvaluationForX());
+        }
+
+        /// <summary>
+        /// Clasifica el último movimiento ejecutado en lenguaje amigable ("Muy buen movimiento", "Buen movimiento", "Mal movimiento", etc.).
+        /// </summary>
+        public string GetCurrentMoveQuality(out string explanation)
+        {
+            int ply = _workingState.MoveCount;
+            if (ply <= 0 || ply > _allMoves.Count)
+            {
+                explanation = "Avanza con los botones para revisar cada jugada.";
+                return "Inicio de partida";
+            }
+
+            if (_cachedMoveQualityByPly.TryGetValue(ply, out var cached))
+            {
+                explanation = cached.Explanation;
+                return cached.Quality;
+            }
+
+            var beforeState = new GameState();
+            for (int i = 0; i < ply - 1; i++)
+            {
+                beforeState.MakeMove(_allMoves[i]);
+            }
+
+            Move playedMove = _allMoves[ply - 1];
+            string quality = MinimaxBot.ClassifyMoveQuality(beforeState, playedMove, out explanation);
+            _cachedMoveQualityByPly[ply] = (quality, explanation);
+            return quality;
         }
     }
 }

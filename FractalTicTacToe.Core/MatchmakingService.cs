@@ -18,10 +18,21 @@ namespace FractalTicTacToe.Core
             public TimeControlConfig TimeControl;
         }
 
+        private struct PrivateLobbyEntry
+        {
+            public string InviteCode;
+            public string HostPlayerId;
+            public TimeControlConfig TimeControl;
+        }
+
+        private static readonly char[] InviteCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".ToCharArray();
+
         private readonly object _syncLock = new object();
+        private readonly Random _rng = new Random();
         private readonly Dictionary<string, PlayerProfile> _accountsById = new Dictionary<string, PlayerProfile>(StringComparer.Ordinal);
         private readonly Dictionary<string, PlayerProfile> _accountsByUsername = new Dictionary<string, PlayerProfile>(StringComparer.OrdinalIgnoreCase);
         private readonly List<QueueEntry> _matchmakingQueue = new List<QueueEntry>();
+        private readonly Dictionary<string, PrivateLobbyEntry> _privateLobbiesByCode = new Dictionary<string, PrivateLobbyEntry>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, OnlineMatchRoom> _activeRooms = new Dictionary<string, OnlineMatchRoom>(StringComparer.Ordinal);
         private readonly Dictionary<string, OnlineMatchRoom> _finishedRooms = new Dictionary<string, OnlineMatchRoom>(StringComparer.Ordinal);
         private readonly List<MatchRecord> _completedMatches = new List<MatchRecord>();
@@ -261,6 +272,100 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
+        /// Crea una sala privada con un código de invitación corto de 4 caracteres para jugar con un amigo.
+        /// </summary>
+        public string CreatePrivateLobby(string hostPlayerId, TimeControlConfig timeControl)
+        {
+            lock (_syncLock)
+            {
+                if (!_accountsById.ContainsKey(hostPlayerId))
+                {
+                    throw new InvalidOperationException("La cuenta de jugador no existe.");
+                }
+
+                RemoveFromQueueInternal(hostPlayerId);
+
+                string code;
+                do
+                {
+                    char[] chars = new char[4];
+                    for (int i = 0; i < 4; i++)
+                    {
+                        chars[i] = InviteCodeAlphabet[_rng.Next(InviteCodeAlphabet.Length)];
+                    }
+                    code = new string(chars);
+                } while (_privateLobbiesByCode.ContainsKey(code));
+
+                _privateLobbiesByCode[code] = new PrivateLobbyEntry
+                {
+                    InviteCode = code,
+                    HostPlayerId = hostPlayerId,
+                    TimeControl = timeControl
+                };
+
+                return code;
+            }
+        }
+
+        /// <summary>
+        /// Une a un jugador a una sala privada mediante su código de 4 caracteres e inicia la partida.
+        /// </summary>
+        public OnlineMatchRoom JoinPrivateLobby(string guestPlayerId, string inviteCode, out string errorMessage)
+        {
+            errorMessage = null;
+            if (string.IsNullOrWhiteSpace(inviteCode))
+            {
+                errorMessage = "Ingresa un código de sala válido.";
+                return null;
+            }
+
+            string cleanCode = inviteCode.Trim().ToUpperInvariant();
+
+            lock (_syncLock)
+            {
+                if (!_accountsById.TryGetValue(guestPlayerId, out PlayerProfile guest))
+                {
+                    errorMessage = "Debes iniciar sesión primero.";
+                    return null;
+                }
+
+                if (!_privateLobbiesByCode.TryGetValue(cleanCode, out PrivateLobbyEntry lobby))
+                {
+                    errorMessage = $"No existe ninguna sala activa con el código '{cleanCode}'.";
+                    return null;
+                }
+
+                if (string.Equals(lobby.HostPlayerId, guestPlayerId, StringComparison.Ordinal))
+                {
+                    errorMessage = "No puedes unirte a tu propia sala privada.";
+                    return null;
+                }
+
+                if (!_accountsById.TryGetValue(lobby.HostPlayerId, out PlayerProfile host))
+                {
+                    _privateLobbiesByCode.Remove(cleanCode);
+                    errorMessage = "El anfitrión de la sala ya no está disponible.";
+                    return null;
+                }
+
+                _privateLobbiesByCode.Remove(cleanCode);
+                RemoveFromQueueInternal(host.PlayerId);
+                RemoveFromQueueInternal(guest.PlayerId);
+
+                bool hostGetsX = ((host.GamesPlayed + guest.GamesPlayed) & 1) == 0;
+                PlayerProfile playerX = hostGetsX ? host : guest;
+                PlayerProfile playerO = hostGetsX ? guest : host;
+
+                string roomId = "room_" + Guid.NewGuid().ToString("N").Substring(0, 10);
+                var room = new OnlineMatchRoom(roomId, playerX, playerO, lobby.TimeControl);
+                room.MatchConcluded += OnRoomMatchConcluded;
+                _activeRooms[roomId] = room;
+
+                return room;
+            }
+        }
+
+        /// <summary>
         /// Crea una sala de revancha directa invirtiendo los roles (X <-> O) y conservando el control de tiempo.
         /// </summary>
         public OnlineMatchRoom CreateRematchRoom(OnlineMatchRoom previousRoom)
@@ -293,15 +398,36 @@ namespace FractalTicTacToe.Core
 
         private bool RemoveFromQueueInternal(string playerId)
         {
+            bool removed = false;
             for (int i = _matchmakingQueue.Count - 1; i >= 0; i--)
             {
                 if (string.Equals(_matchmakingQueue[i].PlayerId, playerId, StringComparison.Ordinal))
                 {
                     _matchmakingQueue.RemoveAt(i);
-                    return true;
+                    removed = true;
                 }
             }
-            return false;
+
+            List<string> codesToRemove = null;
+            foreach (var kvp in _privateLobbiesByCode)
+            {
+                if (string.Equals(kvp.Value.HostPlayerId, playerId, StringComparison.Ordinal))
+                {
+                    if (codesToRemove == null) codesToRemove = new List<string>();
+                    codesToRemove.Add(kvp.Key);
+                }
+            }
+
+            if (codesToRemove != null)
+            {
+                foreach (string c in codesToRemove)
+                {
+                    _privateLobbiesByCode.Remove(c);
+                    removed = true;
+                }
+            }
+
+            return removed;
         }
 
         public OnlineMatchRoom GetRoom(string roomId)

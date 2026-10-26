@@ -18,8 +18,8 @@ config/name="Gatote Fractal • Muerte Súbita"
 run/main_scene="res://Scenes/Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Mobile")
 boot_splash/bg_color=Color(0.0588235, 0.0784314, 0.121569, 1)
+boot_splash/stretch_mode=0
 boot_splash/image="res://Assets/gatote_logo.png"
-boot_splash/fullsize=false
 config/icon="res://Assets/gatote_icon.png"
 
 [display]

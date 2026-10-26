@@ -24,11 +24,14 @@ namespace FractalTicTacToe.Core
         public const string CmdLeaderboard = "LEADERBOARD";         // LEADERBOARD
         public const string CmdHistory = "HISTORY";                 // HISTORY|<username>
         public const string CmdDeleteAccount = "DELETE_ACCOUNT";    // DELETE_ACCOUNT|<password>
+        public const string CmdCreatePrivate = "CREATE_PRIVATE";    // CREATE_PRIVATE|<timeControlCode>
+        public const string CmdJoinPrivate = "JOIN_PRIVATE";        // JOIN_PRIVATE|<inviteCode>
 
         // Eventos Servidor -> Cliente
         public const string EvtAuthOk = "AUTH_OK";                  // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>
         public const string EvtQueued = "QUEUED";                   // QUEUED|<elo>|<timeControlCode>
         public const string EvtQueueCancelled = "QUEUE_CANCELLED";  // QUEUE_CANCELLED
+        public const string EvtPrivateCreated = "PRIVATE_CREATED";  // PRIVATE_CREATED|<inviteCode>|<timeControlCode>
         public const string EvtMatchStart = "MATCH_START";          // MATCH_START|<roomId>|<assignedRole>|<userX>|<eloX>|<userO>|<eloO>|<fen>|<timeControlCode>
         public const string EvtStateSync = "STATE_SYNC";            // STATE_SYNC|<roomId>|<lastBoard>|<lastCell>|<fen>|<movesTranscript>
         public const string EvtTakebackOffered = "TAKEBACK_OFFERED";// TAKEBACK_OFFERED|<roomId>|<requesterRole>|<pliesToUndo>
@@ -100,6 +103,15 @@ namespace FractalTicTacToe.Core
 
         public static string BuildDeleteAccount(string password = "") =>
             $"{CmdDeleteAccount}|{Sanitize(password)}";
+
+        public static string BuildCreatePrivate(string timeControlCode = "3+2") =>
+            $"{CmdCreatePrivate}|{Sanitize(timeControlCode)}";
+
+        public static string BuildJoinPrivate(string inviteCode) =>
+            $"{CmdJoinPrivate}|{Sanitize(inviteCode).ToUpperInvariant()}";
+
+        public static string BuildPrivateCreated(string inviteCode, string timeControlCode) =>
+            $"{EvtPrivateCreated}|{Sanitize(inviteCode).ToUpperInvariant()}|{Sanitize(timeControlCode)}";
 
         public static string BuildAccountDeleted(string username) =>
             $"{EvtAccountDeleted}|{Sanitize(username)}";

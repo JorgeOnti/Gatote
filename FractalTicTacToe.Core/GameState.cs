@@ -150,6 +150,16 @@ namespace FractalTicTacToe.Core
         public Player this[int boardIndex, int cellIndex] => GetCell(boardIndex, cellIndex);
 
         /// <summary>
+        /// Devuelve cuántas casillas vacías quedan en un sub-tablero (0..9) en O(1).
+        /// </summary>
+        public int GetBoardEmptyCount(int boardIndex)
+        {
+            if ((uint)boardIndex >= BoardCount)
+                throw new ArgumentOutOfRangeException(nameof(boardIndex));
+            return CellsPerBoard - _boardOccupancy[boardIndex];
+        }
+
+        /// <summary>
         /// Obtiene el último movimiento aplicado en la partida, o null si no hay movimientos en el historial.
         /// </summary>
         public Move? GetLastMove()
