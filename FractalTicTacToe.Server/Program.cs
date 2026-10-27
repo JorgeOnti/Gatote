@@ -19,7 +19,8 @@ namespace FractalTicTacToe.Server
     public static class Program
     {
         private const int DefaultPort = 7777;
-        private const string DataDirectory = "ServerData";
+        private const int DisconnectGracePeriodMs = 20_000;
+        private static string DataDirectory = "ServerData";
 
         private static readonly MatchmakingService Matchmaking = new MatchmakingService();
         private static readonly ConcurrentDictionary<string, ClientConnection> ConnectedClientsByPlayerId =
@@ -38,14 +39,26 @@ namespace FractalTicTacToe.Server
                 port = envPort;
             }
 
+            string envDataDir = Environment.GetEnvironmentVariable("SERVER_DATA_DIR");
+            if (!string.IsNullOrWhiteSpace(envDataDir))
+            {
+                DataDirectory = envDataDir.Trim();
+            }
+
             Matchmaking.LoadFromDirectory(DataDirectory);
 
             Console.WriteLine("╔══════════════════════════════════════════════════════════════════════╗");
             Console.WriteLine("║      FRACTAL TIC-TAC-TOE  •  SERVIDOR MULTIJUGADOR AUTORITATIVO     ║");
             Console.WriteLine("╚══════════════════════════════════════════════════════════════════════╝");
             Console.WriteLine($"  Puerto TCP       : {port}");
+            Console.WriteLine($"  Localhost PC     : 127.0.0.1:{port}");
+            Console.WriteLine($"  Emulador Android : 10.0.2.2:{port}");
+            foreach (string lanIp in GetLocalIPv4Addresses())
+            {
+                Console.WriteLine($"  Red Wi-Fi / LAN  : {lanIp}:{port}  (Usa esta IP en tu celular Android físico)");
+            }
             Console.WriteLine($"  Datos persistidos: ./{DataDirectory}/ (accounts.tsv, matches.pgn)");
-            Console.WriteLine("  Protocolo        : REGISTER, LOGIN, QUEUE, MOVE, TAKEBACK, TIMEOUT, ABORT, REMATCH");
+            Console.WriteLine("  Protocolo        : REGISTER, LOGIN, RESUME, QUEUE, PRIVATE, MOVE, TAKEBACK, REMATCH");
             Console.WriteLine("  Presiona Ctrl+C para detener el servidor de forma segura.\n");
 
             var cts = new CancellationTokenSource();
@@ -164,6 +177,41 @@ namespace FractalTicTacToe.Server
                     }
 
                     CompleteClientAuthentication(sender, loginProfile, "LOGIN");
+                    break;
+
+                case MultiplayerProtocol.CmdResume:
+                    if (parts.Length < 4 || string.IsNullOrWhiteSpace(parts[1]) || string.IsNullOrWhiteSpace(parts[3]))
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError("Formato RESUME inválido."));
+                        return;
+                    }
+
+                    PlayerProfile resumeProfile;
+                    if (!string.IsNullOrEmpty(parts[2]))
+                    {
+                        if (!Matchmaking.AuthenticateAccount(parts[1], parts[2], out resumeProfile, out string resErr))
+                        {
+                            sender.Send(MultiplayerProtocol.BuildError(resErr));
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        resumeProfile = Matchmaking.GetOrCreateAccount(parts[1]);
+                    }
+
+                    CompleteClientAuthentication(sender, resumeProfile, "RECONEXIÓN");
+                    OnlineMatchRoom resumeRoom = Matchmaking.GetRoom(parts[3]);
+                    if (resumeRoom != null && !resumeRoom.IsMatchOver)
+                    {
+                        Player resumedRole = resumeRoom.GetPlayerRole(resumeProfile.PlayerId);
+                        if (resumedRole != Player.None)
+                        {
+                            sender.ActiveRoomId = resumeRoom.RoomId;
+                            sender.Send(MultiplayerProtocol.BuildSessionResumed(resumeRoom, resumedRole));
+                            Console.WriteLine($"[SESIÓN REANUDADA] {sender.Username} retomó su asiento [{resumedRole}] en la sala {resumeRoom.RoomId}.");
+                        }
+                    }
                     break;
 
                 case MultiplayerProtocol.CmdQueue:
@@ -493,14 +541,72 @@ namespace FractalTicTacToe.Server
                 return;
             }
 
-            Matchmaking.RemoveFromQueue(connection.PlayerId);
-            ConnectedClientsByPlayerId.TryRemove(connection.PlayerId, out _);
+            string disconnectedPlayerId = connection.PlayerId;
+            string disconnectedRoomId = connection.ActiveRoomId;
 
-            if (!string.IsNullOrEmpty(connection.ActiveRoomId))
+            Matchmaking.RemoveFromQueue(disconnectedPlayerId);
+
+            // Solo remover del diccionario si la conexión actual sigue siendo exactamente esta instancia
+            if (ConnectedClientsByPlayerId.TryGetValue(disconnectedPlayerId, out ClientConnection activeConn) &&
+                ReferenceEquals(activeConn, connection))
             {
-                OnlineMatchRoom activeRoom = Matchmaking.GetRoom(connection.ActiveRoomId);
-                activeRoom?.ForfeitByDisconnectOrTimeout(connection.PlayerId, isTimeout: false);
+                ConnectedClientsByPlayerId.TryRemove(disconnectedPlayerId, out _);
             }
+
+            if (!string.IsNullOrEmpty(disconnectedRoomId))
+            {
+                OnlineMatchRoom activeRoom = Matchmaking.GetRoom(disconnectedRoomId);
+                if (activeRoom != null && !activeRoom.IsMatchOver)
+                {
+                    if (activeRoom.State.MoveCount == 0)
+                    {
+                        // Si aún no se hacía el primer movimiento, abortar sin puntos tras una breve ventana
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(3000).ConfigureAwait(false);
+                            if (!ConnectedClientsByPlayerId.ContainsKey(disconnectedPlayerId) && !activeRoom.IsMatchOver)
+                            {
+                                activeRoom.AbortByFirstMoveTimeout();
+                            }
+                        });
+                    }
+                    else
+                    {
+                        // Ventana de gracia de 20 segundos para reconexión ante micro-cortes de red móvil
+                        Console.WriteLine($"[VENTANA DE RECONEXIÓN] Esperando 20s a {connection.Username} en sala {disconnectedRoomId}...");
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(DisconnectGracePeriodMs).ConfigureAwait(false);
+                            if (!ConnectedClientsByPlayerId.ContainsKey(disconnectedPlayerId) && !activeRoom.IsMatchOver)
+                            {
+                                activeRoom.ForfeitByDisconnectOrTimeout(disconnectedPlayerId, isTimeout: false);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        private static List<string> GetLocalIPv4Addresses()
+        {
+            var result = new List<string>();
+            try
+            {
+                string hostName = Dns.GetHostName();
+                IPAddress[] addresses = Dns.GetHostAddresses(hostName);
+                foreach (IPAddress ip in addresses)
+                {
+                    if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                    {
+                        result.Add(ip.ToString());
+                    }
+                }
+            }
+            catch
+            {
+                // Ignorar si no se pueden enumerar interfaces
+            }
+            return result;
         }
 
         private static bool EnsureAuthenticated(ClientConnection sender)

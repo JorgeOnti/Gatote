@@ -27,7 +27,7 @@
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(Configuration)' == 'Release' And $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
-		<AndroidPackageFormat>aab</AndroidPackageFormat>
+		<AndroidPackageFormats>aab;apk</AndroidPackageFormats>
 		<AndroidKeyStore Condition="Exists('gatote-release.keystore')">true</AndroidKeyStore>
 		<AndroidSigningKeyStore Condition="Exists('gatote-release.keystore')">gatote-release.keystore</AndroidSigningKeyStore>
 		<AndroidSigningKeyAlias Condition="Exists('gatote-release.keystore')">gatote_key</AndroidSigningKeyAlias>

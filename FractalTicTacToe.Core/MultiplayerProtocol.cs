@@ -26,6 +26,7 @@ namespace FractalTicTacToe.Core
         public const string CmdDeleteAccount = "DELETE_ACCOUNT";    // DELETE_ACCOUNT|<password>
         public const string CmdCreatePrivate = "CREATE_PRIVATE";    // CREATE_PRIVATE|<timeControlCode>
         public const string CmdJoinPrivate = "JOIN_PRIVATE";        // JOIN_PRIVATE|<inviteCode>
+        public const string CmdResume = "RESUME";                   // RESUME|<username>|<password>|<roomId>
 
         // Eventos Servidor -> Cliente
         public const string EvtAuthOk = "AUTH_OK";                  // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>
@@ -33,6 +34,7 @@ namespace FractalTicTacToe.Core
         public const string EvtQueueCancelled = "QUEUE_CANCELLED";  // QUEUE_CANCELLED
         public const string EvtPrivateCreated = "PRIVATE_CREATED";  // PRIVATE_CREATED|<inviteCode>|<timeControlCode>
         public const string EvtMatchStart = "MATCH_START";          // MATCH_START|<roomId>|<assignedRole>|<userX>|<eloX>|<userO>|<eloO>|<fen>|<timeControlCode>
+        public const string EvtSessionResumed = "SESSION_RESUMED";  // SESSION_RESUMED|<roomId>|<assignedRole>|<userX>|<eloX>|<userO>|<eloO>|<fen>|<movesTranscript>|<timeControlCode>
         public const string EvtStateSync = "STATE_SYNC";            // STATE_SYNC|<roomId>|<lastBoard>|<lastCell>|<fen>|<movesTranscript>
         public const string EvtTakebackOffered = "TAKEBACK_OFFERED";// TAKEBACK_OFFERED|<roomId>|<requesterRole>|<pliesToUndo>
         public const string EvtTakebackResolved = "TAKEBACK_RESOLVED";// TAKEBACK_RESOLVED|<roomId>|<ACCEPTED|DECLINED>|<fen>|<movesTranscript>
@@ -112,6 +114,14 @@ namespace FractalTicTacToe.Core
 
         public static string BuildPrivateCreated(string inviteCode, string timeControlCode) =>
             $"{EvtPrivateCreated}|{Sanitize(inviteCode).ToUpperInvariant()}|{Sanitize(timeControlCode)}";
+
+        public static string BuildResume(string username, string password, string roomId) =>
+            $"{CmdResume}|{Sanitize(username)}|{Sanitize(password)}|{Sanitize(roomId)}";
+
+        public static string BuildSessionResumed(OnlineMatchRoom room, Player assignedRole) =>
+            $"{EvtSessionResumed}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.EloRating}|" +
+            $"{room.PlayerO.Username}|{room.PlayerO.EloRating}|{GameSerializer.ToFen(room.State)}|" +
+            $"{GameSerializer.ExportMoveHistory(room.State)}|{room.TimeControl.ToCode()}";
 
         public static string BuildAccountDeleted(string username) =>
             $"{EvtAccountDeleted}|{Sanitize(username)}";

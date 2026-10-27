@@ -62,6 +62,10 @@ namespace FractalTicTacToe.Core
         private bool _pendingQueueAfterAuth;
         private TimeControlConfig _pendingQueueTimeControl = TimeControlConfig.Blitz3Plus2;
         private int _pendingQueueMaxEloGap = 400;
+        private string _lastHost;
+        private int _lastPort = 7777;
+        private string _lastUsername;
+        private string _lastPassword;
 
         // Eventos para actualizar la UI de Godot 4 y .NET MAUI
         public event Action StateChanged;
@@ -69,6 +73,7 @@ namespace FractalTicTacToe.Core
         public event Action<int> QueuedForMatch;
         public event Action<string, string> PrivateLobbyCreated;
         public event Action<string, Player, string, int, string, int> MatchStarted;
+        public event Action<string> SessionResumed;
         public event Action<Player, int> TakebackOfferedByOpponent;
         public event Action<bool> TakebackResolved;
         public event Action<Player, MatchEndReason, EloMatchUpdate> MatchEnded;
@@ -89,8 +94,13 @@ namespace FractalTicTacToe.Core
                 throw new ArgumentException("El nombre de usuario no puede estar vacío.", nameof(username));
             }
 
+            _lastHost = host;
+            _lastPort = port;
+            _lastUsername = username.Trim();
+            _lastPassword = password ?? string.Empty;
+
             await EnsureSocketConnectedAsync(host, port).ConfigureAwait(false);
-            SendRawLine(MultiplayerProtocol.BuildLogin(username.Trim(), password ?? string.Empty));
+            SendRawLine(MultiplayerProtocol.BuildLogin(_lastUsername, _lastPassword));
         }
 
         /// <summary>
@@ -103,8 +113,13 @@ namespace FractalTicTacToe.Core
                 throw new ArgumentException("El nombre de usuario no puede estar vacío.", nameof(username));
             }
 
+            _lastHost = host;
+            _lastPort = port;
+            _lastUsername = username.Trim();
+            _lastPassword = password ?? string.Empty;
+
             await EnsureSocketConnectedAsync(host, port).ConfigureAwait(false);
-            SendRawLine(MultiplayerProtocol.BuildRegister(username.Trim(), password ?? string.Empty));
+            SendRawLine(MultiplayerProtocol.BuildRegister(_lastUsername, _lastPassword));
         }
 
         private async Task EnsureSocketConnectedAsync(string host, int port)
@@ -118,32 +133,64 @@ namespace FractalTicTacToe.Core
             _intentionalDisconnect = false;
             _handlingUnexpectedDisconnect = false;
 
-            var tcp = new TcpClient();
-            try
+            string[] candidateHosts = GetCandidateHosts(host);
+            TcpClient connectedClient = null;
+            string winningHost = host;
+
+            foreach (string candidate in candidateHosts)
             {
-                Task connectTask = tcp.ConnectAsync(host, port);
-                Task completed = await Task.WhenAny(connectTask, Task.Delay(DefaultConnectTimeoutMs)).ConfigureAwait(false);
-                if (completed != connectTask || connectTask.IsFaulted || !tcp.Connected)
+                var tcp = new TcpClient();
+                try
+                {
+                    int timeoutMs = candidateHosts.Length > 1 ? 1200 : DefaultConnectTimeoutMs;
+                    Task connectTask = tcp.ConnectAsync(candidate, port);
+                    Task completed = await Task.WhenAny(connectTask, Task.Delay(timeoutMs)).ConfigureAwait(false);
+                    if (completed == connectTask && !connectTask.IsFaulted && tcp.Connected)
+                    {
+                        await connectTask.ConfigureAwait(false);
+                        connectedClient = tcp;
+                        winningHost = candidate;
+                        break;
+                    }
+                    try { tcp.Close(); } catch { }
+                }
+                catch
                 {
                     try { tcp.Close(); } catch { }
-                    throw new TimeoutException("No se pudo conectar al servidor.");
                 }
-
-                await connectTask.ConfigureAwait(false);
             }
-            catch
+
+            if (connectedClient == null)
             {
-                try { tcp.Close(); } catch { }
-                throw;
+                throw new TimeoutException("No se pudo conectar al servidor.");
             }
 
-            _tcpClient = tcp;
+            _lastHost = winningHost;
+            _tcpClient = connectedClient;
             NetworkStream stream = _tcpClient.GetStream();
             _reader = new StreamReader(stream, Encoding.UTF8);
             _writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
             _receiveCts = new CancellationTokenSource();
 
             _ = ReceiveLoopAsync(_receiveCts.Token);
+        }
+
+        private static string[] GetCandidateHosts(string primaryHost)
+        {
+            string h = (primaryHost ?? "127.0.0.1").Trim();
+            if (h == "127.0.0.1" || h == "10.0.2.2" || h == "192.168.1.84" || h == "localhost")
+            {
+                var list = new System.Collections.Generic.List<string> { h };
+                foreach (string fallback in new[] { "127.0.0.1", "192.168.1.84", "10.0.2.2" })
+                {
+                    if (!list.Contains(fallback))
+                    {
+                        list.Add(fallback);
+                    }
+                }
+                return list.ToArray();
+            }
+            return new[] { h };
         }
 
         /// <summary>
@@ -512,7 +559,11 @@ namespace FractalTicTacToe.Core
             {
                 if (!_intentionalDisconnect)
                 {
-                    HandleUnexpectedServerDisconnect();
+                    bool resumed = await TryAutoReconnectAndResumeAsync().ConfigureAwait(false);
+                    if (!resumed)
+                    {
+                        HandleUnexpectedServerDisconnect();
+                    }
                 }
                 else
                 {
@@ -522,6 +573,55 @@ namespace FractalTicTacToe.Core
                     StateChanged?.Invoke();
                 }
             }
+        }
+
+        /// <summary>
+        /// Intenta reconectar automáticamente ante micro-cortes de red móvil (Wi-Fi / 4G) si había una partida activa.
+        /// Si el servidor realmente se cayó, retorna <c>false</c> en menos de 1.5s para cancelar sin congelar.
+        /// </summary>
+        private async Task<bool> TryAutoReconnectAndResumeAsync()
+        {
+            string roomToResume = ActiveRoomId;
+            if (string.IsNullOrEmpty(roomToResume) || State.IsGameOver ||
+                string.IsNullOrEmpty(_lastHost) || string.IsNullOrEmpty(_lastUsername))
+            {
+                return false;
+            }
+
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                if (_intentionalDisconnect) return false;
+                await Task.Delay(350).ConfigureAwait(false);
+
+                var tcp = new TcpClient();
+                try
+                {
+                    Task connectTask = tcp.ConnectAsync(_lastHost, _lastPort);
+                    Task completed = await Task.WhenAny(connectTask, Task.Delay(900)).ConfigureAwait(false);
+                    if (completed != connectTask || connectTask.IsFaulted || !tcp.Connected)
+                    {
+                        try { tcp.Close(); } catch { }
+                        continue;
+                    }
+
+                    await connectTask.ConfigureAwait(false);
+                    _tcpClient = tcp;
+                    NetworkStream stream = _tcpClient.GetStream();
+                    _reader = new StreamReader(stream, Encoding.UTF8);
+                    _writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+                    _receiveCts = new CancellationTokenSource();
+                    _ = ReceiveLoopAsync(_receiveCts.Token);
+
+                    SendRawLine(MultiplayerProtocol.BuildResume(_lastUsername, _lastPassword ?? string.Empty, roomToResume));
+                    return true;
+                }
+                catch
+                {
+                    try { tcp.Close(); } catch { }
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -641,6 +741,56 @@ namespace FractalTicTacToe.Core
 
                         State = GameSerializer.FromFen(parts[7]);
                         MatchStarted?.Invoke(ActiveRoomId, AssignedRole, userX, eloX, userO, eloO);
+                        StateChanged?.Invoke();
+                    }
+                    break;
+
+                case MultiplayerProtocol.EvtSessionResumed:
+                    // SESSION_RESUMED|<roomId>|<assignedRole>|<userX>|<eloX>|<userO>|<eloO>|<fen>|<movesTranscript>|<timeControlCode>
+                    if (parts.Length >= 9)
+                    {
+                        IsInQueue = false;
+                        PendingInviteCode = null;
+                        ActiveRoomId = parts[1];
+                        Enum.TryParse(parts[2], ignoreCase: true, out Player resumedRole);
+                        AssignedRole = resumedRole;
+
+                        string rUserX = parts[3];
+                        int.TryParse(parts[4], out int rEloX);
+                        string rUserO = parts[5];
+                        int.TryParse(parts[6], out int rEloO);
+
+                        if (AssignedRole == Player.X)
+                        {
+                            LocalUsername = rUserX;
+                            LocalElo = rEloX;
+                            OpponentUsername = rUserO;
+                            OpponentElo = rEloO;
+                        }
+                        else
+                        {
+                            LocalUsername = rUserO;
+                            LocalElo = rEloO;
+                            OpponentUsername = rUserX;
+                            OpponentElo = rEloX;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(parts[8]))
+                        {
+                            State = GameSerializer.ImportMoveHistory(parts[8]);
+                        }
+                        else
+                        {
+                            State = GameSerializer.FromFen(parts[7]);
+                        }
+
+                        LastNetworkMove = State.GetLastMove();
+                        if (State.MoveCount > 0 && !State.IsGameOver)
+                        {
+                            Clock.Start(State.CurrentPlayer);
+                        }
+
+                        SessionResumed?.Invoke(ActiveRoomId);
                         StateChanged?.Invoke();
                     }
                     break;

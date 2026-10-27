@@ -2,7 +2,7 @@
 **/obj/
 **/.vs/
 **/.godot/
-**/.mono/
-FractalTicTacToe.Godot/
-FractalTicTacToe.Maui/
 .git/
+ServerData/
+FractalTicTacToe.Maui/
+FractalTicTacToe.Godot/

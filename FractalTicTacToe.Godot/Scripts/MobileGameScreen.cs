@@ -45,6 +45,8 @@ namespace FractalTicTacToe.GodotClient
         private OnlineMultiplayerClient _onlineClient;
         private readonly MatchmakingService _localAuthStore = new MatchmakingService();
         private bool _isOnlineMode;
+        private bool _isTutorialMode;
+        private int _tutorialStep;
         private string _authenticatedUsername = string.Empty;
         private string _authenticatedPassword = string.Empty;
         private double _queueElapsedSeconds;
@@ -1064,8 +1066,11 @@ namespace FractalTicTacToe.GodotClient
             _lobbyLeagueBadgeLabel.AddThemeFontSizeOverride("font_size", 18);
             _lobbyLeagueBadgeLabel.AddThemeColorOverride("font_color", new Color(0.75f, 0.84f, 0.96f));
 
+            var topTutorialBtn = CreateActionButton("Cómo jugar (Tutorial interactivo)", StartInteractiveTutorial, minHeight: 46);
+
             accountBox.AddChild(_lobbyProfileSummaryLabel);
             accountBox.AddChild(_lobbyLeagueBadgeLabel);
+            accountBox.AddChild(topTutorialBtn);
             accountCard.AddChild(accountBox);
             col.AddChild(accountCard);
 
@@ -1222,8 +1227,10 @@ namespace FractalTicTacToe.GodotClient
             _matchmakingLoadingPanel.AddChild(loadingCol);
             col.AddChild(_matchmakingLoadingPanel);
 
-            // 5. Guía minimalista de 3 pasos
-            var ruleCard = CreateStyledPanel(SurfaceColor, InactiveMacroBorderColor, borderWidth: 1, cornerRadius: 14, contentMargin: 12);
+            // 5. Guía minimalista de 3 pasos + Botón de Tutorial Interactivo
+            var ruleCard = CreateStyledPanel(SurfaceColor, ActiveMacroBorderColor, borderWidth: 2, cornerRadius: 14, contentMargin: 12);
+            var ruleCol = new VBoxContainer();
+            ruleCol.AddThemeConstantOverride("separation", 8);
             var ruleLbl = new Label
             {
                 Text = "Cómo jugar: 1. Juega en un cuadro verde • 2. Tu casilla envía al rival al siguiente tablero • 3. Gana el primero en hacer 3 en línea.",
@@ -1232,7 +1239,10 @@ namespace FractalTicTacToe.GodotClient
             };
             ruleLbl.AddThemeFontSizeOverride("font_size", 17);
             ruleLbl.AddThemeColorOverride("font_color", new Color(0.72f, 0.80f, 0.90f));
-            ruleCard.AddChild(ruleLbl);
+            var startTutorialBtn = CreateActionButton("Cómo jugar (Tutorial interactivo)", StartInteractiveTutorial, minHeight: 52);
+            ruleCol.AddChild(ruleLbl);
+            ruleCol.AddChild(startTutorialBtn);
+            ruleCard.AddChild(ruleCol);
             col.AddChild(ruleCard);
 
             UpdateLobbyModeVisibility();
@@ -1322,10 +1332,27 @@ namespace FractalTicTacToe.GodotClient
             }
         }
 
+        private void StartInteractiveTutorial()
+        {
+            _isOnlineMode = false;
+            _isTutorialMode = true;
+            _tutorialStep = 1;
+            _lastAnimatedMove = null;
+            _victoryLineAnimated = false;
+
+            _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
+            _localSession.SetTimeControl(TimeControlConfig.Unlimited);
+            _localSession.ConfigureSession(SessionMode.PassAndPlay2P, BotDifficulty.Easy, _localSession.ProfileX);
+            _currentHintMove = new Move(4, 0);
+
+            NavigateToScreen(ScreenState.PlayArena);
+        }
+
         private void StartBotMatchWithoutClock(BotDifficulty difficulty)
         {
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
+            _isTutorialMode = false;
             _currentHintMove = null;
             _lastAnimatedMove = null;
             _victoryLineAnimated = false;
@@ -1350,6 +1377,7 @@ namespace FractalTicTacToe.GodotClient
             if (_selectedOpponentType == LobbyOpponentType.LocalPassAndPlay)
             {
                 _isOnlineMode = false;
+                _isTutorialMode = false;
                 _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador 1";
                 _localSession.SetTimeControl(selectedTime);
                 _localSession.ConfigureSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, _localSession.ProfileX);
@@ -1359,6 +1387,7 @@ namespace FractalTicTacToe.GodotClient
 
             // REQUERIMIENTO 11: En modo En Línea, mostrar Loading ahí mismo en Inicio mientras encuentra rival
             _isOnlineMode = true;
+            _isTutorialMode = false;
             _queueElapsedSeconds = 0.0;
 
             try
@@ -2229,6 +2258,12 @@ namespace FractalTicTacToe.GodotClient
 
         private async void OnCellTapped(int boardIndex, int cellIndex)
         {
+            if (_isTutorialMode)
+            {
+                HandleTutorialCellTapped(boardIndex, cellIndex);
+                return;
+            }
+
             _currentHintMove = null;
 
             if (_isOnlineMode)
@@ -2334,8 +2369,59 @@ namespace FractalTicTacToe.GodotClient
             NavigateToScreen(ScreenState.HomeLobby);
         }
 
+        private void HandleTutorialCellTapped(int boardIndex, int cellIndex)
+        {
+            if (_tutorialStep == 1)
+            {
+                if (boardIndex != 4 || cellIndex != 0)
+                {
+                    _telemetryLabel.Text = "Paso 1: Toca la casilla con borde morado (Gato central, esquina superior izquierda).";
+                    return;
+                }
+
+                _localSession.State.MakeMove(new Move(4, 0));
+                _localSession.State.MakeMove(new Move(0, 4));
+                _tutorialStep = 2;
+                _currentHintMove = new Move(4, 1);
+                RefreshUI();
+            }
+            else if (_tutorialStep == 2)
+            {
+                if (boardIndex != 4 || cellIndex != 1)
+                {
+                    _telemetryLabel.Text = "Paso 2: Toca la casilla con borde morado (Gato central, arriba al centro).";
+                    return;
+                }
+
+                _localSession.State.MakeMove(new Move(4, 1));
+                _localSession.State.MakeMove(new Move(1, 4));
+                _tutorialStep = 3;
+                _currentHintMove = new Move(4, 2);
+                RefreshUI();
+            }
+            else if (_tutorialStep == 3)
+            {
+                if (boardIndex != 4 || cellIndex != 2)
+                {
+                    _telemetryLabel.Text = "Paso 3: Toca la casilla con borde morado (Gato central, esquina superior derecha) para ganar.";
+                    return;
+                }
+
+                _localSession.State.MakeMove(new Move(4, 2));
+                _tutorialStep = 4;
+                _currentHintMove = null;
+                RefreshUI();
+            }
+        }
+
         private void OnRematchPressed()
         {
+            if (_isTutorialMode)
+            {
+                StartInteractiveTutorial();
+                return;
+            }
+
             _currentHintMove = null;
             _lastAnimatedMove = null;
             _victoryLineAnimated = false;
@@ -2550,6 +2636,71 @@ namespace FractalTicTacToe.GodotClient
         {
             GameState state = _localSession.State;
             Move? lastMove = state.GetLastMove();
+
+            if (_isTutorialMode)
+            {
+                SetPanelBorderColor(_leftPlayerCard, PlayerXColor);
+                SetPanelBorderColor(_rightPlayerCard, PlayerOColor);
+
+                _leftPlayerTitleLabel.Text = "[X] Tú";
+                _leftPlayerTitleLabel.AddThemeColorOverride("font_color", PlayerXColor);
+                _leftPlayerRatingLabel.Text = "Tutorial interactivo";
+
+                _rightPlayerTitleLabel.Text = "[O] Guía";
+                _rightPlayerTitleLabel.AddThemeColorOverride("font_color", PlayerOColor);
+                _rightPlayerRatingLabel.Text = _tutorialStep <= 3 ? $"Paso {_tutorialStep} de 3" : "Completado";
+
+                _leftClockLabel.Visible = false;
+                _rightClockLabel.Visible = false;
+
+                if (_tutorialStep == 1)
+                {
+                    _currentHintMove = new Move(4, 0);
+                    _statusBannerLabel.Text = "PASO 1/3: Tu casilla envía al rival al siguiente gato";
+                    _telemetryLabel.Text = "Toca la casilla morada (Gato central, esquina superior izquierda) para enviar al rival al gato de arriba a la izquierda.";
+                }
+                else if (_tutorialStep == 2)
+                {
+                    _currentHintMove = new Move(4, 1);
+                    _statusBannerLabel.Text = "PASO 2/3: Arma tu ataque y redirige al rival";
+                    _telemetryLabel.Text = "El rival tiró en su centro y te regresó al gato central. Toca la casilla morada (arriba al centro) para armar 2 en línea.";
+                }
+                else if (_tutorialStep == 3)
+                {
+                    _currentHintMove = new Move(4, 2);
+                    _statusBannerLabel.Text = "PASO 3/3: ¡Muerte Súbita! Gana con 3 en línea";
+                    _telemetryLabel.Text = "¡El rival cometió el error de regresarte al gato central! Toca la casilla morada para completar 3 en línea y ganar.";
+                }
+                else
+                {
+                    _currentHintMove = null;
+                    _statusBannerLabel.Text = "¡Tutorial completado! Ya dominas Gatote";
+                    _telemetryLabel.Text = "Regla clave: Nunca envíes al rival a un gato donde ya tenga 2 en línea listos para ganar.";
+                }
+
+                RenderBoardCellsAndAnimate(state, lastMove, !state.IsGameOver);
+
+                _inGameActionsRow.Visible = !state.IsGameOver;
+                _postGameActionsRow.Visible = state.IsGameOver;
+
+                if (!state.IsGameOver)
+                {
+                    _undoButton.Visible = false;
+                    _redoButton.Visible = false;
+                    _hintButton.Visible = false;
+                    _resignOrLeaveButton.Text = "Salir del tutorial";
+                    _resignOrLeaveButton.Disabled = false;
+                }
+                else
+                {
+                    _rematchButton.Text = "Repetir tutorial";
+                    _rematchButton.Disabled = false;
+                    _analyzeFinishedMatchButton.Visible = false;
+                }
+                return;
+            }
+
+            _undoButton.Visible = true;
 
             bool isVsAi = _localSession.Mode == SessionMode.HumanVsBotX || _localSession.Mode == SessionMode.BotVsHumanO;
             bool humanIsO = _localSession.Mode == SessionMode.BotVsHumanO;

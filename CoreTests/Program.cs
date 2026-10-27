@@ -769,6 +769,13 @@ namespace CoreTests
                 Assert(!client.LastRatingUpdate.HasValue, "Nadie debe ganar ni perder puntos cuando el servidor se cae.");
                 Assert(client.LocalElo == 1350, "El puntaje del jugador debe permanecer intacto (1350).");
                 Assert(!string.IsNullOrEmpty(disconnectMessage), "Debe disparar el evento ServerConnectionLost con un mensaje para redirigir a Inicio.");
+
+                // 3. Verificar reanudación de sesión ante micro-cortes de red móvil (SESSION_RESUMED)
+                string resumedRoomId = null;
+                client.SessionResumed += rId => resumedRoomId = rId;
+                client.ProcessServerPacket(MultiplayerProtocol.BuildSessionResumed(room, Player.X));
+                Assert(resumedRoomId == room.RoomId && client.IsInActiveMatch, "El cliente debe restaurar la partida activa al recibir SESSION_RESUMED.");
+                Assert(client.State.MoveCount == 1 && client.State.GetLastMove() == new Move(4, 4), "El estado del tablero debe restaurar el movimiento (4,4).");
             }
         }
 
