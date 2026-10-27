@@ -8,11 +8,12 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <LangVersion>latest</LangVersion>
+    <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
-  <!-- Libera automáticamente cualquier instancia previa del servidor en Windows antes de compilar para evitar bloqueos MSB3026 -->
+  <!-- Libera automáticamente cualquier instancia previa del servidor en el puerto 7777 antes de compilar para evitar bloqueos MSB3026 -->
   <Target Name="StopRunningServerInstance" BeforeTargets="BeforeBuild;CopyFilesToOutputDirectory" Condition="'$(OS)' == 'Windows_NT'">
-    <Exec Command="powershell -NoProfile -Command &quot;Get-Process -Name 'FractalTicTacToe.Server' -ErrorAction SilentlyContinue | Stop-Process -Force; Get-CimInstance Win32_Process -Filter \&quot;Name = 'dotnet.exe' AND CommandLine LIKE '%FractalTicTacToe.Server.dll%'\&quot; -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
+    <Exec Command="powershell -NoProfile -Command &quot;Get-NetTCPConnection -LocalPort 7777 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
   </Target>
 
 </Project>
