@@ -395,8 +395,8 @@ namespace FractalTicTacToe.Core
             // Garantizar que el GameState quede marcado como terminado con el ganador efectivo antes de exportar FEN
             State.ForceConclude(winner);
 
-            int eloXBefore = PlayerX.EloRating;
-            int eloOBefore = PlayerO.EloRating;
+            int eloXBefore = PlayerX.GetRatingForTimeControl(TimeControl);
+            int eloOBefore = PlayerO.GetRatingForTimeControl(TimeControl);
             EloMatchUpdate update;
 
             if (reason == MatchEndReason.Aborted)
@@ -412,8 +412,8 @@ namespace FractalTicTacToe.Core
                     PlayerO.GamesPlayed,
                     winner);
 
-                PlayerX.ApplyMatchResult(Player.X, winner, update.NewRatingX);
-                PlayerO.ApplyMatchResult(Player.O, winner, update.NewRatingO);
+                PlayerX.ApplyMatchResultForTimeControl(TimeControl, Player.X, winner, update.NewRatingX);
+                PlayerO.ApplyMatchResultForTimeControl(TimeControl, Player.O, winner, update.NewRatingO);
             }
 
             CompletedEloUpdate = update;

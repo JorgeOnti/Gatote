@@ -75,9 +75,23 @@ namespace FractalTicTacToe.Maui
         private Move? _lastAnimatedMove;
 
         private readonly List<MatchRecord> _recordedMatches = new List<MatchRecord>();
+        private List<MatchRecord> _filteredAnalysisMatches = new List<MatchRecord>();
+        private MatchDateFilter _selectedAnalysisDateFilter = MatchDateFilter.All;
         private MatchReplayNavigator _replayNavigator;
         private string _lastRecordedMatchId;
         private Move? _currentHintMove;
+
+        // Modo personalizado de tiempo para 2 Jugadores
+        private Border _customPassPlayTimePanel;
+        private int _customMinutesValue = 5;
+        private int _customIncrementValue = 3;
+        private Label _customTimeSummaryLabel;
+
+        // Botones de filtro por fecha en Análisis
+        private Button _filterAllBtn;
+        private Button _filterTodayBtn;
+        private Button _filterWeekBtn;
+        private Button _filterMonthBtn;
 
         private static readonly TimeControlConfig[] TimeControls =
         {
@@ -224,6 +238,9 @@ namespace FractalTicTacToe.Maui
             _onlineClient.ServerConnectionLost += OnOnlineServerConnectionLost;
             _onlineClient.LeaderboardReceived += OnLeaderboardReceived;
 
+            LoadRecordedMatchesFromDisk();
+            PreloadSavedProfileAndStartEarlyLogin();
+
             BuildMobileShellUI();
             StartClockTimer();
 
@@ -232,6 +249,35 @@ namespace FractalTicTacToe.Maui
             _splashCompleted = false;
             NavigateToScreen(ScreenState.SplashLoading);
             RefreshUI();
+        }
+
+        private void PreloadSavedProfileAndStartEarlyLogin()
+        {
+            if (TryLoadSavedSession(out string savedUser, out string savedPass))
+            {
+                _authenticatedUsername = savedUser;
+                _authenticatedPassword = savedPass;
+                _localSession.ProfileX.Username = savedUser;
+
+                if (!TryLoadCachedProfileFromDisk(savedUser))
+                {
+                    if (_localAuthStore.AuthenticateAccount(savedUser, savedPass, out PlayerProfile localProf, out _) && localProf != null)
+                    {
+                        _onlineClient.LoadCachedProfile(
+                            localProf.Username,
+                            localProf.EloRating,
+                            localProf.BulletElo,
+                            localProf.BlitzElo,
+                            localProf.RapidElo,
+                            localProf.Wins,
+                            localProf.Losses,
+                            localProf.Draws);
+                    }
+                }
+
+                // Iniciar conexión y autenticación durante la pantalla Splash de carga inicial
+                _ = AuthenticateSavedSessionInBackgroundAsync(savedUser, savedPass);
+            }
         }
 
         private string ResolveInitialServerHost()
@@ -594,13 +640,7 @@ namespace FractalTicTacToe.Maui
 
             if (targetScreen == ScreenState.AnalysisStudio)
             {
-                if (_recordedMatches.Count > 0)
-                {
-                    _suppressPickerEvent = true;
-                    _matchSelectorPicker.SelectedIndex = 0;
-                    _suppressPickerEvent = false;
-                    _replayNavigator = new MatchReplayNavigator(_recordedMatches[0]);
-                }
+                PopulateMatchSelectorDropdown();
                 RefreshAnalysisUI();
             }
             else if (targetScreen == ScreenState.ProfileAndLeagues)
@@ -851,6 +891,7 @@ namespace FractalTicTacToe.Maui
             {
                 SaveSessionToDisk(_authenticatedUsername, _authenticatedPassword);
             }
+            SaveCachedProfileToDisk();
 
             if (_currentScreen == ScreenState.AuthScreen)
             {
@@ -1077,6 +1118,66 @@ namespace FractalTicTacToe.Maui
             _privateRoomPanel.Content = privStack;
             col.Add(_privateRoomPanel);
 
+            // 4B-Custom: Modo Personalizado y Sin Tiempo (Solo visible en modo 2 Jugadores)
+            _customPassPlayTimePanel = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1, cornerRadius: 10, padding: new Thickness(10, 8));
+            _customPassPlayTimePanel.IsVisible = false;
+            var customStack = new VerticalStackLayout { Spacing = 6 };
+            customStack.Add(new Label
+            {
+                Text = "PERSONALIZADO O SIN TIEMPO (2 JUGADORES)",
+                FontSize = 11,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = MutedTextColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            });
+
+            _customTimeSummaryLabel = new Label
+            {
+                Text = $"Reloj personalizado: {_customMinutesValue} min + {_customIncrementValue} s",
+                FontSize = 12,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = ActiveMacroBorderColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            };
+            customStack.Add(_customTimeSummaryLabel);
+
+            var customAdjustGrid = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star }
+                },
+                ColumnSpacing = 6
+            };
+
+            customAdjustGrid.Add(CreateActionButton("- Min", () => AdjustCustomClock(-1, 0), height: 34, fontSize: 11), 0, 0);
+            customAdjustGrid.Add(CreateActionButton("+ Min", () => AdjustCustomClock(1, 0), height: 34, fontSize: 11), 1, 0);
+            customAdjustGrid.Add(CreateActionButton("- Inc", () => AdjustCustomClock(0, -1), height: 34, fontSize: 11), 2, 0);
+            customAdjustGrid.Add(CreateActionButton("+ Inc", () => AdjustCustomClock(0, 1), height: 34, fontSize: 11), 3, 0);
+            customStack.Add(customAdjustGrid);
+
+            var customStartGrid = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star }
+                },
+                ColumnSpacing = 8
+            };
+            var startUntimed2PBtn = CreateActionButton("Jugar Sin Tiempo", () => StartCustomPassAndPlayMatch(TimeControlConfig.Unlimited), height: 38, fontSize: 12);
+            var startCustom2PBtn = CreateActionButton("Iniciar Personalizada", () => StartCustomPassAndPlayMatch(TimeControlConfig.CreateCustom(_customMinutesValue, _customIncrementValue)), height: 38, fontSize: 12);
+            startCustom2PBtn.BackgroundColor = Color.FromRgb(30, 92, 68);
+            customStartGrid.Add(startUntimed2PBtn, 0, 0);
+            customStartGrid.Add(startCustom2PBtn, 1, 0);
+            customStack.Add(customStartGrid);
+
+            _customPassPlayTimePanel.Content = customStack;
+            col.Add(_customPassPlayTimePanel);
+
             // 4C. Panel de Loading al buscar partida en línea o sala privada desde Inicio
             _matchmakingLoadingPanel = CreateCardBorder(Color.FromRgb(25, 40, 64), ActiveMacroBorderColor, strokeThickness: 2, cornerRadius: 12, padding: new Thickness(14));
             _matchmakingLoadingPanel.IsVisible = false;
@@ -1164,6 +1265,7 @@ namespace FractalTicTacToe.Maui
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = false;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
+                if (_customPassPlayTimePanel != null) _customPassPlayTimePanel.IsVisible = false;
                 _lobbySection2TitleLabel.Text = "CONECTANDO PARTIDA";
                 return;
             }
@@ -1174,6 +1276,7 @@ namespace FractalTicTacToe.Maui
                 _botDifficultyGrid.IsVisible = true;
                 _quickPairingTimeGrid.IsVisible = false;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
+                if (_customPassPlayTimePanel != null) _customPassPlayTimePanel.IsVisible = false;
             }
             else if (_selectedOpponentType == LobbyOpponentType.OnlineMultiplayer)
             {
@@ -1181,6 +1284,7 @@ namespace FractalTicTacToe.Maui
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = true;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = true;
+                if (_customPassPlayTimePanel != null) _customPassPlayTimePanel.IsVisible = false;
             }
             else
             {
@@ -1188,7 +1292,31 @@ namespace FractalTicTacToe.Maui
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = true;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
+                if (_customPassPlayTimePanel != null) _customPassPlayTimePanel.IsVisible = true;
             }
+        }
+
+        private void AdjustCustomClock(int deltaMinutes, int deltaIncrement)
+        {
+            TriggerSubtleHaptic();
+            _customMinutesValue = Math.Clamp(_customMinutesValue + deltaMinutes, 1, 30);
+            _customIncrementValue = Math.Clamp(_customIncrementValue + deltaIncrement, 0, 30);
+            if (_customTimeSummaryLabel != null)
+            {
+                _customTimeSummaryLabel.Text = $"Reloj personalizado: {_customMinutesValue} min + {_customIncrementValue} s";
+            }
+        }
+
+        private void StartCustomPassAndPlayMatch(TimeControlConfig customTimeControl)
+        {
+            TriggerSubtleHaptic();
+            ExitTutorialMode();
+            if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
+            _isOnlineMode = false;
+            _currentHintMove = null;
+            PrepareNewLocalSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, customTimeControl, "Jugador 1");
+            _hasUnfinishedLocalMatch = true;
+            NavigateToScreen(ScreenState.PlayArena);
         }
 
         private void StartInteractiveTutorial()
@@ -1415,6 +1543,7 @@ namespace FractalTicTacToe.Maui
                 {
                     RecordCompletedMatchIfNeeded(_onlineClient.LastCompletedMatchRecord);
                 }
+                SaveCachedProfileToDisk();
                 RefreshUI();
             });
         }
@@ -1661,12 +1790,36 @@ namespace FractalTicTacToe.Maui
                 {
                     new RowDefinition { Height = GridLength.Auto },
                     new RowDefinition { Height = GridLength.Auto },
+                    new RowDefinition { Height = GridLength.Auto },
                     new RowDefinition { Height = GridLength.Star },
                     new RowDefinition { Height = GridLength.Auto },
                     new RowDefinition { Height = GridLength.Auto }
                 },
                 RowSpacing = 6
             };
+
+            var filterGrid = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Star }
+                },
+                ColumnSpacing = 6
+            };
+
+            _filterAllBtn = CreateActionButton("Todas", () => SetAnalysisDateFilter(MatchDateFilter.All), height: 34, fontSize: 11);
+            _filterTodayBtn = CreateActionButton("Hoy", () => SetAnalysisDateFilter(MatchDateFilter.Today), height: 34, fontSize: 11);
+            _filterWeekBtn = CreateActionButton("Semana", () => SetAnalysisDateFilter(MatchDateFilter.LastWeek), height: 34, fontSize: 11);
+            _filterMonthBtn = CreateActionButton("Mes", () => SetAnalysisDateFilter(MatchDateFilter.LastMonth), height: 34, fontSize: 11);
+
+            filterGrid.Add(_filterAllBtn, 0, 0);
+            filterGrid.Add(_filterTodayBtn, 1, 0);
+            filterGrid.Add(_filterWeekBtn, 2, 0);
+            filterGrid.Add(_filterMonthBtn, 3, 0);
+            grid.Add(filterGrid, 0, 0);
 
             _matchSelectorPicker = new Picker
             {
@@ -1679,13 +1832,13 @@ namespace FractalTicTacToe.Maui
             {
                 if (_suppressPickerEvent) return;
                 int idx = _matchSelectorPicker.SelectedIndex;
-                if (idx >= 0 && idx < _recordedMatches.Count)
+                if (idx >= 0 && idx < _filteredAnalysisMatches.Count)
                 {
-                    _replayNavigator = new MatchReplayNavigator(_recordedMatches[idx]);
+                    _replayNavigator = new MatchReplayNavigator(_filteredAnalysisMatches[idx]);
                     RefreshAnalysisUI();
                 }
             };
-            grid.Add(_matchSelectorPicker, 0, 0);
+            grid.Add(_matchSelectorPicker, 0, 1);
 
             var evalCard = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1.5, cornerRadius: 10, padding: new Thickness(8, 6));
             var evalStack = new VerticalStackLayout { Spacing = 4 };
@@ -1709,10 +1862,10 @@ namespace FractalTicTacToe.Maui
             evalStack.Add(_evalScoreLabel);
             evalStack.Add(_evalProgressBar);
             evalCard.Content = evalStack;
-            grid.Add(evalCard, 0, 1);
+            grid.Add(evalCard, 0, 2);
 
             View analysisBoard = CreateFractalBoardGrid(_analysisMacroBorders, _analysisCellButtons, null, fontSize: 14);
-            grid.Add(analysisBoard, 0, 2);
+            grid.Add(analysisBoard, 0, 3);
 
             _analysisStepInfoLabel = new Label
             {
@@ -1721,7 +1874,7 @@ namespace FractalTicTacToe.Maui
                 TextColor = LastMoveHighlightColor,
                 HorizontalTextAlignment = TextAlignment.Center
             };
-            grid.Add(_analysisStepInfoLabel, 0, 3);
+            grid.Add(_analysisStepInfoLabel, 0, 4);
 
             var vcrGrid = new Grid
             {
@@ -1744,10 +1897,18 @@ namespace FractalTicTacToe.Maui
             vcrGrid.Add(_stepBackBtn, 1, 0);
             vcrGrid.Add(_stepForwardBtn, 2, 0);
             vcrGrid.Add(_stepEndBtn, 3, 0);
-            grid.Add(vcrGrid, 0, 4);
+            grid.Add(vcrGrid, 0, 5);
 
             PopulateMatchSelectorDropdown();
             return grid;
+        }
+
+        private void SetAnalysisDateFilter(MatchDateFilter filter)
+        {
+            TriggerSubtleHaptic();
+            _selectedAnalysisDateFilter = filter;
+            PopulateMatchSelectorDropdown();
+            RefreshAnalysisUI();
         }
 
         // =====================================================================
@@ -2314,6 +2475,7 @@ namespace FractalTicTacToe.Maui
 
             _lastRecordedMatchId = record.MatchId;
             _recordedMatches.Insert(0, record);
+            SaveRecordedMatchesToDisk();
             _replayNavigator = new MatchReplayNavigator(record);
             PopulateMatchSelectorDropdown();
         }
@@ -2322,27 +2484,38 @@ namespace FractalTicTacToe.Maui
         {
             if (_matchSelectorPicker == null) return;
 
+            HighlightTabButton(_filterAllBtn, _selectedAnalysisDateFilter == MatchDateFilter.All);
+            HighlightTabButton(_filterTodayBtn, _selectedAnalysisDateFilter == MatchDateFilter.Today);
+            HighlightTabButton(_filterWeekBtn, _selectedAnalysisDateFilter == MatchDateFilter.LastWeek);
+            HighlightTabButton(_filterMonthBtn, _selectedAnalysisDateFilter == MatchDateFilter.LastMonth);
+
+            _filteredAnalysisMatches = MatchRecord.FilterByDate(_recordedMatches, _selectedAnalysisDateFilter);
+
             _suppressPickerEvent = true;
             _matchSelectorPicker.Items.Clear();
 
-            if (_recordedMatches.Count == 0)
+            if (_filteredAnalysisMatches.Count == 0)
             {
-                _matchSelectorPicker.Items.Add("Sin partidas jugadas aún");
+                _matchSelectorPicker.Items.Add(_recordedMatches.Count == 0
+                    ? "Sin partidas jugadas aún"
+                    : "Sin partidas en este periodo");
                 _matchSelectorPicker.SelectedIndex = 0;
                 _suppressPickerEvent = false;
+                _replayNavigator = null;
                 return;
             }
 
-            for (int i = 0; i < _recordedMatches.Count; i++)
+            for (int i = 0; i < _filteredAnalysisMatches.Count; i++)
             {
-                MatchRecord m = _recordedMatches[i];
+                MatchRecord m = _filteredAnalysisMatches[i];
                 string winnerTag = m.Winner == Player.None ? "Empate" : $"Ganó {m.Winner}";
-                string latestTag = i == 0 ? " (Última)" : "";
-                _matchSelectorPicker.Items.Add($"#{i + 1}{latestTag}: {m.PlayerXName} vs {m.PlayerOName} • {winnerTag}");
+                string dateTag = m.PlayedAtUtc.ToLocalTime().ToString("dd/MM HH:mm");
+                _matchSelectorPicker.Items.Add($"#{i + 1} ({dateTag}): {m.PlayerXName} vs {m.PlayerOName} • {winnerTag}");
             }
 
             _matchSelectorPicker.SelectedIndex = 0;
             _suppressPickerEvent = false;
+            _replayNavigator = new MatchReplayNavigator(_filteredAnalysisMatches[0]);
         }
 
         private void OnOnlineErrorReceived(string errorMsg)
@@ -2406,17 +2579,18 @@ namespace FractalTicTacToe.Maui
                 ? _authenticatedUsername
                 : _localSession.ProfileX.Username;
 
-            int onlineRating = _onlineClient.IsAuthenticated ? _onlineClient.LocalElo : EloRatingCalculator.DefaultInitialRating;
-            string onlineRank = EloRatingCalculator.GetRankTitle(onlineRating);
+            TimeControlConfig activeTc = TimeControls[Math.Clamp(_timeControlIndex, 0, TimeControls.Length - 1)];
+            int modeRating = _onlineClient.GetLocalEloForTimeControl(activeTc);
+            string onlineRank = EloRatingCalculator.GetRankTitle(modeRating);
 
             _topHeaderSubtitleLabel.Text = _currentScreen == ScreenState.AuthScreen
                 ? "Acceso"
-                : $"{displayUser} • {onlineRating} pts ({onlineRank})";
+                : $"{displayUser} • {activeTc.CategoryDisplayName}: {modeRating} pts ({onlineRank})";
 
             _lobbyProfileSummaryLabel.Text = displayUser;
             _lobbyLeagueBadgeLabel.Text =
-                $"{onlineRating} pts • Liga {onlineRank} • " +
-                $"{_onlineClient.LocalWins}V {_onlineClient.LocalLosses}D {_onlineClient.LocalDraws}E";
+                $"Bullet {_onlineClient.LocalBulletElo} • Blitz {_onlineClient.LocalBlitzElo} • Rápida {_onlineClient.LocalRapidElo}\n" +
+                $"Liga {onlineRank} • {_onlineClient.LocalWins}V {_onlineClient.LocalLosses}D {_onlineClient.LocalDraws}E";
 
             RefreshActiveMatchesCardUI();
             UpdateLobbyModeVisibility();
@@ -2817,7 +2991,7 @@ namespace FractalTicTacToe.Maui
         private void RefreshProfileScreenUI()
         {
             string name = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : _localSession.ProfileX.Username;
-            int rating = _onlineClient.IsAuthenticated ? _onlineClient.LocalElo : EloRatingCalculator.DefaultInitialRating;
+            int rating = _onlineClient.LocalElo;
             string rank = EloRatingCalculator.GetRankTitle(rating);
             int wins = _onlineClient.LocalWins;
             int losses = _onlineClient.LocalLosses;
@@ -2826,7 +3000,9 @@ namespace FractalTicTacToe.Maui
             double winRate = totalOnline == 0 ? 0.0 : (wins * 100.0) / totalOnline;
 
             _profileNameLabel.Text = name;
-            _profileRatingBigLabel.Text = $"{rating} pts • Liga {rank}";
+            _profileRatingBigLabel.Text =
+                $"Bullet: {_onlineClient.LocalBulletElo} • Blitz: {_onlineClient.LocalBlitzElo} • Rápida: {_onlineClient.LocalRapidElo}\n" +
+                $"Liga {rank}";
             _profileStatsGridLabel.Text =
                 $"En línea: {totalOnline} | Victorias: {wins} | Derrotas: {losses} | Empates: {draws}\n" +
                 $"Efectividad: {winRate:F0}% | Partidas guardadas: {_recordedMatches.Count}";
@@ -3188,6 +3364,85 @@ namespace FractalTicTacToe.Maui
             try
             {
                 _localAuthStore.SaveToDirectory(GetAuthDataDir());
+            }
+            catch { }
+        }
+
+        private void SaveCachedProfileToDisk()
+        {
+            try
+            {
+                string user = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : _onlineClient.LocalUsername;
+                if (string.IsNullOrWhiteSpace(user)) return;
+                string file = Path.Combine(GetAuthDataDir(), "saved_profile_cache.txt");
+                string line =
+                    $"{user}\t{_onlineClient.LocalElo}\t{_onlineClient.LocalBulletElo}\t{_onlineClient.LocalBlitzElo}\t{_onlineClient.LocalRapidElo}\t" +
+                    $"{_onlineClient.LocalWins}\t{_onlineClient.LocalLosses}\t{_onlineClient.LocalDraws}";
+                File.WriteAllText(file, line);
+            }
+            catch { }
+        }
+
+        private bool TryLoadCachedProfileFromDisk(string expectedUsername)
+        {
+            try
+            {
+                string file = Path.Combine(GetAuthDataDir(), "saved_profile_cache.txt");
+                if (!File.Exists(file)) return false;
+                string[] cols = File.ReadAllText(file).Trim().Split('\t');
+                if (cols.Length < 8) return false;
+                if (!string.IsNullOrEmpty(expectedUsername) &&
+                    !string.Equals(cols[0], expectedUsername, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                int.TryParse(cols[1], out int elo);
+                int.TryParse(cols[2], out int bElo);
+                int.TryParse(cols[3], out int zElo);
+                int.TryParse(cols[4], out int rElo);
+                int.TryParse(cols[5], out int wins);
+                int.TryParse(cols[6], out int losses);
+                int.TryParse(cols[7], out int draws);
+
+                _onlineClient.LoadCachedProfile(cols[0], elo, bElo, zElo, rElo, wins, losses, draws);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string GetRecordedMatchesFilePath()
+        {
+            return Path.Combine(GetAuthDataDir(), "recorded_matches.pgn");
+        }
+
+        private void SaveRecordedMatchesToDisk()
+        {
+            try
+            {
+                MatchRecord.SaveHistoryToFile(GetRecordedMatchesFilePath(), _recordedMatches);
+            }
+            catch { }
+        }
+
+        private void LoadRecordedMatchesFromDisk()
+        {
+            try
+            {
+                List<MatchRecord> loaded = MatchRecord.LoadHistoryFromFile(GetRecordedMatchesFilePath());
+                _recordedMatches.Clear();
+                foreach (MatchRecord m in loaded)
+                {
+                    _recordedMatches.Add(m);
+                }
+                if (_recordedMatches.Count > 0)
+                {
+                    _lastRecordedMatchId = _recordedMatches[0].MatchId;
+                    _replayNavigator = new MatchReplayNavigator(_recordedMatches[0]);
+                }
             }
             catch { }
         }

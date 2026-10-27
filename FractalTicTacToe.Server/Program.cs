@@ -218,6 +218,13 @@ namespace FractalTicTacToe.Server
 
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
+                        if (msgBuilder.Length + result.Count > MultiplayerProtocol.MaxPacketLength)
+                        {
+                            msgBuilder.Clear();
+                            connection.Send(MultiplayerProtocol.BuildError("Paquete demasiado grande."));
+                            continue;
+                        }
+
                         msgBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
                         if (result.EndOfMessage)
                         {
@@ -258,7 +265,7 @@ namespace FractalTicTacToe.Server
                 }
 
                 bytes.Add(b);
-                if (bytes.Count > 8192)
+                if (bytes.Count > MultiplayerProtocol.MaxPacketLength)
                 {
                     break;
                 }
@@ -269,6 +276,12 @@ namespace FractalTicTacToe.Server
 
         private static void ProcessCommand(ClientConnection sender, string rawLine)
         {
+            if (!sender.CheckRateLimit())
+            {
+                sender.Send(MultiplayerProtocol.BuildError("Demasiadas solicitudes seguidas. Espera un momento."));
+                return;
+            }
+
             string[] parts = MultiplayerProtocol.SplitPacket(rawLine);
             if (parts.Length == 0)
             {
@@ -280,6 +293,11 @@ namespace FractalTicTacToe.Server
             switch (cmd)
             {
                 case MultiplayerProtocol.CmdRegister:
+                    if (sender.IsAuthLockedOut())
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError("Demasiados intentos fallidos. Espera 15 segundos."));
+                        return;
+                    }
                     if (parts.Length < 3)
                     {
                         sender.Send(MultiplayerProtocol.BuildError("Debes proporcionar usuario y contraseña para registrarte."));
@@ -288,14 +306,21 @@ namespace FractalTicTacToe.Server
 
                     if (!Matchmaking.RegisterAccount(parts[1], parts[2], out PlayerProfile registeredProfile, out string regError))
                     {
+                        sender.RegisterFailedAuth();
                         sender.Send(MultiplayerProtocol.BuildError(regError));
                         return;
                     }
 
+                    sender.ResetFailedAuth();
                     CompleteClientAuthentication(sender, registeredProfile, "REGISTRO");
                     break;
 
                 case MultiplayerProtocol.CmdLogin:
+                    if (sender.IsAuthLockedOut())
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError("Demasiados intentos fallidos. Espera 15 segundos."));
+                        return;
+                    }
                     if (parts.Length < 2 || string.IsNullOrWhiteSpace(parts[1]))
                     {
                         sender.Send(MultiplayerProtocol.BuildError("Debes proporcionar un nombre de usuario."));
@@ -307,6 +332,7 @@ namespace FractalTicTacToe.Server
                     {
                         if (!Matchmaking.AuthenticateAccount(parts[1], parts[2], out loginProfile, out string authError))
                         {
+                            sender.RegisterFailedAuth();
                             sender.Send(MultiplayerProtocol.BuildError(authError));
                             return;
                         }
@@ -316,10 +342,16 @@ namespace FractalTicTacToe.Server
                         loginProfile = Matchmaking.GetOrCreateAccount(parts[1]);
                     }
 
+                    sender.ResetFailedAuth();
                     CompleteClientAuthentication(sender, loginProfile, "LOGIN");
                     break;
 
                 case MultiplayerProtocol.CmdResume:
+                    if (sender.IsAuthLockedOut())
+                    {
+                        sender.Send(MultiplayerProtocol.BuildError("Demasiados intentos fallidos. Espera 15 segundos."));
+                        return;
+                    }
                     if (parts.Length < 4 || string.IsNullOrWhiteSpace(parts[1]) || string.IsNullOrWhiteSpace(parts[3]))
                     {
                         sender.Send(MultiplayerProtocol.BuildError("Formato RESUME inválido."));
@@ -331,6 +363,7 @@ namespace FractalTicTacToe.Server
                     {
                         if (!Matchmaking.AuthenticateAccount(parts[1], parts[2], out resumeProfile, out string resErr))
                         {
+                            sender.RegisterFailedAuth();
                             sender.Send(MultiplayerProtocol.BuildError(resErr));
                             return;
                         }
@@ -340,6 +373,7 @@ namespace FractalTicTacToe.Server
                         resumeProfile = Matchmaking.GetOrCreateAccount(parts[1]);
                     }
 
+                    sender.ResetFailedAuth();
                     CompleteClientAuthentication(sender, resumeProfile, "RECONEXIÓN");
                     OnlineMatchRoom resumeRoom = Matchmaking.GetRoom(parts[3]);
                     if (resumeRoom != null && !resumeRoom.IsMatchOver)
@@ -357,7 +391,7 @@ namespace FractalTicTacToe.Server
                 case MultiplayerProtocol.CmdQueue:
                     if (!EnsureAuthenticated(sender)) return;
 
-                    int maxGap = parts.Length >= 2 && int.TryParse(parts[1], out int g) ? g : 400;
+                    int maxGap = parts.Length >= 2 && int.TryParse(parts[1], out int g) ? Math.Clamp(g, 50, 2500) : 400;
                     TimeControlConfig requestedTime = parts.Length >= 3
                         ? TimeControlConfig.FromCode(parts[2])
                         : TimeControlConfig.Blitz3Plus2;
@@ -367,8 +401,9 @@ namespace FractalTicTacToe.Server
                     if (matchedRoom == null)
                     {
                         PlayerProfile p = Matchmaking.GetAccountById(sender.PlayerId);
-                        sender.Send($"{MultiplayerProtocol.EvtQueued}|{p.EloRating}|{requestedTime.ToCode()}");
-                        Console.WriteLine($"[COLA] {sender.Username} ({p.EloRating} pts) buscando rival en modo {requestedTime.Name} ({requestedTime.ToCode()})...");
+                        int modeElo = p.GetRatingForTimeControl(requestedTime);
+                        sender.Send($"{MultiplayerProtocol.EvtQueued}|{modeElo}|{requestedTime.ToCode()}");
+                        Console.WriteLine($"[COLA] {sender.Username} ({modeElo} pts en {requestedTime.CategoryDisplayName}) buscando rival en modo {requestedTime.Name} ({requestedTime.ToCode()})...");
                     }
                     else
                     {
@@ -778,7 +813,16 @@ namespace FractalTicTacToe.Server
 
         private sealed class ClientConnection
         {
+            private const int MaxPacketsPerTwoSeconds = 35;
+            private const int MaxFailedAuthAttempts = 5;
+
             private readonly object _writeLock = new object();
+            private readonly object _rateLock = new object();
+            private DateTime _windowStartUtc = DateTime.UtcNow;
+            private int _packetsInWindow;
+            private int _failedAuthAttempts;
+            private DateTime _authLockedUntilUtc = DateTime.MinValue;
+
             public TcpClient TcpClient { get; }
             public StreamWriter Writer { get; set; }
             public WebSocket WebSocket { get; set; }
@@ -789,6 +833,52 @@ namespace FractalTicTacToe.Server
             public ClientConnection(TcpClient tcpClient)
             {
                 TcpClient = tcpClient;
+            }
+
+            public bool CheckRateLimit()
+            {
+                lock (_rateLock)
+                {
+                    DateTime now = DateTime.UtcNow;
+                    if ((now - _windowStartUtc).TotalSeconds >= 2.0)
+                    {
+                        _windowStartUtc = now;
+                        _packetsInWindow = 1;
+                        return true;
+                    }
+                    _packetsInWindow++;
+                    return _packetsInWindow <= MaxPacketsPerTwoSeconds;
+                }
+            }
+
+            public bool IsAuthLockedOut()
+            {
+                lock (_rateLock)
+                {
+                    return DateTime.UtcNow < _authLockedUntilUtc;
+                }
+            }
+
+            public void RegisterFailedAuth()
+            {
+                lock (_rateLock)
+                {
+                    _failedAuthAttempts++;
+                    if (_failedAuthAttempts >= MaxFailedAuthAttempts)
+                    {
+                        _authLockedUntilUtc = DateTime.UtcNow.AddSeconds(15);
+                        _failedAuthAttempts = 0;
+                    }
+                }
+            }
+
+            public void ResetFailedAuth()
+            {
+                lock (_rateLock)
+                {
+                    _failedAuthAttempts = 0;
+                    _authLockedUntilUtc = DateTime.MinValue;
+                }
             }
 
             public void Send(string packetLine)

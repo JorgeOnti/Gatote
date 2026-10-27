@@ -10,6 +10,9 @@
 		<SingleProject>true</SingleProject>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>disable</Nullable>
+		<CheckEolTargetFramework>false</CheckEolTargetFramework>
+		<CheckEolWorkloads>false</CheckEolWorkloads>
+		<MauiVersion Condition="'$(MauiVersion)' == ''">8.0.100</MauiVersion>
 
 		<!-- Nombre comercial e identificador para Google Play Store y Apple App Store -->
 		<ApplicationTitle>Gatote Fractal</ApplicationTitle>

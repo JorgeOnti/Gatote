@@ -3,6 +3,17 @@ using System.Globalization;
 
 namespace FractalTicTacToe.Core
 {
+    /// <summary>
+    /// Categoría competitiva de control de tiempo para puntuación independiente por modo de juego.
+    /// </summary>
+    public enum TimeControlCategory
+    {
+        Bullet = 0,
+        Blitz = 1,
+        Rapid = 2,
+        Untimed = 3
+    }
+
 #if NET6_0_OR_GREATER
     /// <summary>
     /// Configuración de control de tiempo estilo ajedrez (tiempo inicial + incremento Fischer por jugada).
@@ -14,11 +25,44 @@ namespace FractalTicTacToe.Core
     {
         public bool IsUntimed => InitialSeconds <= 0.0;
 
-        public static TimeControlConfig Unlimited => new TimeControlConfig("Sin Límite", 0.0, 0.0);
+        public TimeControlCategory Category
+        {
+            get
+            {
+                if (IsUntimed) return TimeControlCategory.Untimed;
+                if (InitialSeconds < 180.0) return TimeControlCategory.Bullet;
+                if (InitialSeconds < 300.0) return TimeControlCategory.Blitz;
+                return TimeControlCategory.Rapid;
+            }
+        }
+
+        public string CategoryDisplayName
+        {
+            get
+            {
+                switch (Category)
+                {
+                    case TimeControlCategory.Bullet: return "Bullet";
+                    case TimeControlCategory.Blitz: return "Blitz";
+                    case TimeControlCategory.Rapid: return "Rápida";
+                    default: return "Sin Tiempo";
+                }
+            }
+        }
+
+        public static TimeControlConfig Unlimited => new TimeControlConfig("Sin Tiempo", 0.0, 0.0);
         public static TimeControlConfig Bullet1Plus1 => new TimeControlConfig("Bullet 1+1", 60.0, 1.0);
         public static TimeControlConfig Blitz3Plus0 => new TimeControlConfig("Blitz 3+0", 180.0, 0.0);
         public static TimeControlConfig Blitz3Plus2 => new TimeControlConfig("Blitz 3+2", 180.0, 2.0);
         public static TimeControlConfig Rapid5Plus0 => new TimeControlConfig("Rápida 5+0", 300.0, 0.0);
+
+        public static TimeControlConfig CreateCustom(int minutes, int incrementSeconds)
+        {
+            if (minutes <= 0) return Unlimited;
+            int safeMinutes = Math.Clamp(minutes, 1, 180);
+            int safeInc = Math.Clamp(incrementSeconds, 0, 60);
+            return new TimeControlConfig($"Personalizado {safeMinutes}+{safeInc}", safeMinutes * 60.0, safeInc);
+        }
 
         public string ToCode()
         {
@@ -46,7 +90,9 @@ namespace FractalTicTacToe.Core
                         int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int inc))
                     {
                         if (m <= 0) return Unlimited;
-                        return new TimeControlConfig($"{m}+{inc}", m * 60.0, inc);
+                        int safeM = Math.Clamp(m, 1, 180);
+                        int safeInc = Math.Clamp(inc, 0, 60);
+                        return new TimeControlConfig($"{safeM}+{safeInc}", safeM * 60.0, safeInc);
                     }
                     return Blitz3Plus2;
             }
@@ -63,6 +109,31 @@ namespace FractalTicTacToe.Core
         public double IncrementSeconds { get; }
         public bool IsUntimed => InitialSeconds <= 0.0;
 
+        public TimeControlCategory Category
+        {
+            get
+            {
+                if (IsUntimed) return TimeControlCategory.Untimed;
+                if (InitialSeconds < 180.0) return TimeControlCategory.Bullet;
+                if (InitialSeconds < 300.0) return TimeControlCategory.Blitz;
+                return TimeControlCategory.Rapid;
+            }
+        }
+
+        public string CategoryDisplayName
+        {
+            get
+            {
+                switch (Category)
+                {
+                    case TimeControlCategory.Bullet: return "Bullet";
+                    case TimeControlCategory.Blitz: return "Blitz";
+                    case TimeControlCategory.Rapid: return "Rápida";
+                    default: return "Sin Tiempo";
+                }
+            }
+        }
+
         public TimeControlConfig(string name, double initialSeconds, double incrementSeconds)
         {
             Name = name;
@@ -70,11 +141,19 @@ namespace FractalTicTacToe.Core
             IncrementSeconds = incrementSeconds;
         }
 
-        public static TimeControlConfig Unlimited => new TimeControlConfig("Sin Límite", 0.0, 0.0);
+        public static TimeControlConfig Unlimited => new TimeControlConfig("Sin Tiempo", 0.0, 0.0);
         public static TimeControlConfig Bullet1Plus1 => new TimeControlConfig("Bullet 1+1", 60.0, 1.0);
         public static TimeControlConfig Blitz3Plus0 => new TimeControlConfig("Blitz 3+0", 180.0, 0.0);
         public static TimeControlConfig Blitz3Plus2 => new TimeControlConfig("Blitz 3+2", 180.0, 2.0);
         public static TimeControlConfig Rapid5Plus0 => new TimeControlConfig("Rápida 5+0", 300.0, 0.0);
+
+        public static TimeControlConfig CreateCustom(int minutes, int incrementSeconds)
+        {
+            if (minutes <= 0) return Unlimited;
+            int safeMinutes = Math.Min(180, Math.Max(1, minutes));
+            int safeInc = Math.Min(60, Math.Max(0, incrementSeconds));
+            return new TimeControlConfig($"Personalizado {safeMinutes}+{safeInc}", safeMinutes * 60.0, safeInc);
+        }
 
         public string ToCode()
         {
@@ -95,7 +174,18 @@ namespace FractalTicTacToe.Core
                 case "3+0": return Blitz3Plus0;
                 case "3+2": return Blitz3Plus2;
                 case "5+0": return Rapid5Plus0;
-                default: return Blitz3Plus2;
+                default:
+                    string[] parts = clean.Split('+');
+                    if (parts.Length == 2 &&
+                        int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int m) &&
+                        int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int inc))
+                    {
+                        if (m <= 0) return Unlimited;
+                        int safeM = Math.Min(180, Math.Max(1, m));
+                        int safeInc = Math.Min(60, Math.Max(0, inc));
+                        return new TimeControlConfig($"{safeM}+{safeInc}", safeM * 60.0, safeInc);
+                    }
+                    return Blitz3Plus2;
             }
         }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -21,15 +22,50 @@ namespace FractalTicTacToe.Core
     }
 
     /// <summary>
-    /// Perfil de cuenta de jugador con estadísticas acumuladas, credenciales autenticadas y puntaje competitivo.
+    /// Filtro temporal para consultar el historial de partidas jugadas en la pantalla de Análisis.
+    /// </summary>
+    public enum MatchDateFilter
+    {
+        All = 0,
+        Today = 1,
+        LastWeek = 2,
+        LastMonth = 3
+    }
+
+    /// <summary>
+    /// Perfil de cuenta de jugador con estadísticas acumuladas, credenciales autenticadas (PBKDF2-SHA256)
+    /// y puntaje competitivo desglosado por modo de juego (Bullet, Blitz y Rápida).
     /// Diseñado para persistencia local o base de datos de cuentas en línea.
     /// </summary>
     public sealed class PlayerProfile
     {
+        private const int Pbkdf2Iterations = 50_000;
+        private const int SaltSizeBytes = 16;
+        private const int HashSizeBytes = 32;
+        private const string Pbkdf2Prefix = "pbkdf2$";
+
+        private int _eloRating;
+
         public string PlayerId { get; set; }
         public string Username { get; set; }
         public string PasswordHash { get; set; } = string.Empty;
-        public int EloRating { get; set; }
+        public int EloRating
+        {
+            get => _eloRating;
+            set
+            {
+                if (BulletElo == _eloRating && BlitzElo == _eloRating && RapidElo == _eloRating)
+                {
+                    BulletElo = value;
+                    BlitzElo = value;
+                    RapidElo = value;
+                }
+                _eloRating = value;
+            }
+        }
+        public int BulletElo { get; set; }
+        public int BlitzElo { get; set; }
+        public int RapidElo { get; set; }
         public int Wins { get; set; }
         public int Losses { get; set; }
         public int Draws { get; set; }
@@ -42,12 +78,47 @@ namespace FractalTicTacToe.Core
         {
             PlayerId = string.IsNullOrWhiteSpace(playerId) ? Guid.NewGuid().ToString("N") : playerId;
             Username = string.IsNullOrWhiteSpace(username) ? "Jugador" : username;
-            EloRating = initialElo;
+            _eloRating = initialElo;
+            BulletElo = initialElo;
+            BlitzElo = initialElo;
+            RapidElo = initialElo;
+        }
+
+        public int GetRatingForTimeControl(TimeControlConfig timeControl)
+        {
+            switch (timeControl.Category)
+            {
+                case TimeControlCategory.Bullet:
+                    return BulletElo;
+                case TimeControlCategory.Blitz:
+                    return BlitzElo;
+                case TimeControlCategory.Rapid:
+                    return RapidElo;
+                default:
+                    return _eloRating;
+            }
+        }
+
+        public void SetRatingForTimeControl(TimeControlConfig timeControl, int newRating)
+        {
+            switch (timeControl.Category)
+            {
+                case TimeControlCategory.Bullet:
+                    BulletElo = newRating;
+                    break;
+                case TimeControlCategory.Blitz:
+                    BlitzElo = newRating;
+                    break;
+                case TimeControlCategory.Rapid:
+                    RapidElo = newRating;
+                    break;
+            }
+            _eloRating = newRating;
         }
 
         public void SetPassword(string plainPassword)
         {
-            PasswordHash = ComputePasswordHash(plainPassword);
+            PasswordHash = ComputeSecurePbkdf2Hash(plainPassword);
         }
 
         public bool VerifyPassword(string plainPassword)
@@ -57,8 +128,86 @@ namespace FractalTicTacToe.Core
                 return true;
             }
 
-            string incomingHash = ComputePasswordHash(plainPassword ?? string.Empty);
-            return string.Equals(PasswordHash, incomingHash, StringComparison.OrdinalIgnoreCase);
+            string candidate = plainPassword ?? string.Empty;
+            if (PasswordHash.StartsWith(Pbkdf2Prefix, StringComparison.Ordinal))
+            {
+                return VerifyPbkdf2Hash(candidate, PasswordHash);
+            }
+
+            // Compatibilidad hacia atrás con hashes SHA-256 previos en accounts.tsv
+            string legacyHash = ComputePasswordHash(candidate);
+            return ConstantTimeStringEquals(PasswordHash, legacyHash);
+        }
+
+        public static string ComputeSecurePbkdf2Hash(string plainPassword)
+        {
+            if (string.IsNullOrEmpty(plainPassword))
+            {
+                return string.Empty;
+            }
+
+            byte[] salt = new byte[SaltSizeBytes];
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(salt);
+            }
+
+            using (var pbkdf2 = new Rfc2898DeriveBytes(plainPassword, salt, Pbkdf2Iterations, HashAlgorithmName.SHA256))
+            {
+                byte[] subkey = pbkdf2.GetBytes(HashSizeBytes);
+                return $"{Pbkdf2Prefix}{Pbkdf2Iterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(subkey)}";
+            }
+        }
+
+        private static bool VerifyPbkdf2Hash(string plainPassword, string storedHash)
+        {
+            if (string.IsNullOrEmpty(plainPassword) || string.IsNullOrEmpty(storedHash))
+            {
+                return false;
+            }
+
+            string[] parts = storedHash.Split('$');
+            if (parts.Length != 4 || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int iterations) || iterations < 1000)
+            {
+                return false;
+            }
+
+            try
+            {
+                byte[] salt = Convert.FromBase64String(parts[2]);
+                byte[] expectedSubkey = Convert.FromBase64String(parts[3]);
+                using (var pbkdf2 = new Rfc2898DeriveBytes(plainPassword, salt, iterations, HashAlgorithmName.SHA256))
+                {
+                    byte[] actualSubkey = pbkdf2.GetBytes(expectedSubkey.Length);
+                    return ConstantTimeBytesEquals(expectedSubkey, actualSubkey);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool ConstantTimeBytesEquals(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length)
+            {
+                return false;
+            }
+            int diff = 0;
+            for (int i = 0; i < a.Length; i++)
+            {
+                diff |= a[i] ^ b[i];
+            }
+            return diff == 0;
+        }
+
+        private static bool ConstantTimeStringEquals(string a, string b)
+        {
+            if (a == null || b == null) return false;
+            byte[] ba = Encoding.UTF8.GetBytes(a.ToLowerInvariant());
+            byte[] bb = Encoding.UTF8.GetBytes(b.ToLowerInvariant());
+            return ConstantTimeBytesEquals(ba, bb);
         }
 
         public static string ComputePasswordHash(string plainPassword)
@@ -83,7 +232,12 @@ namespace FractalTicTacToe.Core
 
         public void ApplyMatchResult(Player assignedRole, Player winner, int newEloRating)
         {
-            EloRating = newEloRating;
+            ApplyMatchResultForTimeControl(TimeControlConfig.Blitz3Plus2, assignedRole, winner, newEloRating);
+        }
+
+        public void ApplyMatchResultForTimeControl(TimeControlConfig timeControl, Player assignedRole, Player winner, int newModeRating)
+        {
+            SetRatingForTimeControl(timeControl, newModeRating);
             if (winner == Player.None)
             {
                 Draws++;
@@ -99,7 +253,7 @@ namespace FractalTicTacToe.Core
         }
 
         public override string ToString() =>
-            $"{Username} [{EloRating} ELO - {RankTitle}] ({Wins}V/{Losses}D/{Draws}E)";
+            $"{Username} [{EloRating} ELO (B:{BulletElo}/Z:{BlitzElo}/R:{RapidElo}) - {RankTitle}] ({Wins}V/{Losses}D/{Draws}E)";
     }
 
     /// <summary>
@@ -303,6 +457,138 @@ namespace FractalTicTacToe.Core
             }
 
             return record;
+        }
+
+        /// <summary>
+        /// Filtra una colección de partidas según el rango temporal elegido (<see cref="MatchDateFilter"/>).
+        /// </summary>
+        public static List<MatchRecord> FilterByDate(
+            IEnumerable<MatchRecord> records,
+            MatchDateFilter filter,
+            DateTime? referenceUtc = null)
+        {
+            var result = new List<MatchRecord>();
+            if (records == null)
+            {
+                return result;
+            }
+
+            DateTime nowUtc = (referenceUtc ?? DateTime.UtcNow).ToUniversalTime();
+            DateTime nowLocal = nowUtc.ToLocalTime();
+
+            foreach (MatchRecord rec in records)
+            {
+                if (rec == null) continue;
+
+                if (filter == MatchDateFilter.All)
+                {
+                    result.Add(rec);
+                    continue;
+                }
+
+                DateTime playedUtc = rec.PlayedAtUtc.Kind == DateTimeKind.Unspecified
+                    ? DateTime.SpecifyKind(rec.PlayedAtUtc, DateTimeKind.Utc)
+                    : rec.PlayedAtUtc.ToUniversalTime();
+                DateTime playedLocal = playedUtc.ToLocalTime();
+                TimeSpan age = nowUtc - playedUtc;
+
+                switch (filter)
+                {
+                    case MatchDateFilter.Today:
+                        if (playedLocal.Date == nowLocal.Date || (age >= TimeSpan.Zero && age.TotalHours <= 24.0))
+                        {
+                            result.Add(rec);
+                        }
+                        break;
+                    case MatchDateFilter.LastWeek:
+                        if (age.TotalDays <= 7.0 && age.TotalDays >= -1.0)
+                        {
+                            result.Add(rec);
+                        }
+                        break;
+                    case MatchDateFilter.LastMonth:
+                        if (age.TotalDays <= 30.0 && age.TotalDays >= -1.0)
+                        {
+                            result.Add(rec);
+                        }
+                        break;
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Guarda en disco el historial de partidas jugadas para que persista al cerrar y volver a abrir la app.
+        /// </summary>
+        public static void SaveHistoryToFile(string filePath, IEnumerable<MatchRecord> records)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || records == null)
+            {
+                return;
+            }
+
+            try
+            {
+                string dir = Path.GetDirectoryName(filePath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                var sb = new StringBuilder();
+                foreach (MatchRecord r in records)
+                {
+                    if (r == null) continue;
+                    sb.AppendLine(r.SerializeToText().Trim());
+                    sb.AppendLine("---");
+                }
+                File.WriteAllText(filePath, sb.ToString(), Encoding.UTF8);
+            }
+            catch
+            {
+                // Ignorar errores de E/S en almacenamiento restringido
+            }
+        }
+
+        /// <summary>
+        /// Carga desde disco el historial de partidas jugadas previamente.
+        /// </summary>
+        public static List<MatchRecord> LoadHistoryFromFile(string filePath)
+        {
+            var result = new List<MatchRecord>();
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+            {
+                return result;
+            }
+
+            try
+            {
+                string content = File.ReadAllText(filePath, Encoding.UTF8);
+                string[] blocks = content.Split(new[] { "---" }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string block in blocks)
+                {
+                    if (string.IsNullOrWhiteSpace(block)) continue;
+                    try
+                    {
+                        MatchRecord rec = DeserializeFromText(block);
+                        if (rec != null)
+                        {
+                            result.Add(rec);
+                        }
+                    }
+                    catch
+                    {
+                        // Ignorar bloque corrupto individual
+                    }
+                }
+            }
+            catch
+            {
+                // Ignorar error de lectura
+            }
+
+            return result;
         }
 
         private static void ParseEloTransition(string text, out int before, out int after)

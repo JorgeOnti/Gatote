@@ -38,6 +38,42 @@ namespace FractalTicTacToe.Core
         private readonly List<MatchRecord> _completedMatches = new List<MatchRecord>();
 
         /// <summary>
+        /// Valida que un nombre de usuario sea seguro (3 a 20 caracteres, sin caracteres de control ni inyección de protocolo).
+        /// </summary>
+        public static bool IsValidUsername(string username, out string cleanUsername, out string validationError)
+        {
+            cleanUsername = string.Empty;
+            validationError = null;
+
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                validationError = "El nombre de usuario debe tener entre 3 y 20 caracteres.";
+                return false;
+            }
+
+            string trimmed = username.Trim();
+            if (trimmed.Length < 3 || trimmed.Length > 20)
+            {
+                validationError = "El nombre de usuario debe tener entre 3 y 20 caracteres.";
+                return false;
+            }
+
+            for (int i = 0; i < trimmed.Length; i++)
+            {
+                char c = trimmed[i];
+                bool allowed = char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == ' ' || c == '.';
+                if (!allowed || char.IsControl(c) || c == '|' || c == '<' || c == '>' || c == '$' || c == ';' || c == '"' || c == '\'')
+                {
+                    validationError = "El nombre de usuario solo puede contener letras, números, espacios, guiones o puntos.";
+                    return false;
+                }
+            }
+
+            cleanUsername = trimmed;
+            return true;
+        }
+
+        /// <summary>
         /// Registra una nueva cuenta de usuario con contraseña. Falla si el nombre de usuario ya está ocupado.
         /// </summary>
         public bool RegisterAccount(string username, string password, out PlayerProfile profile, out string errorMessage)
@@ -45,19 +81,17 @@ namespace FractalTicTacToe.Core
             profile = null;
             errorMessage = null;
 
-            if (string.IsNullOrWhiteSpace(username) || username.Trim().Length < 3)
+            if (!IsValidUsername(username, out string cleanName, out string userErr))
             {
-                errorMessage = "El nombre de usuario debe tener al menos 3 caracteres.";
+                errorMessage = userErr;
                 return false;
             }
 
-            if (string.IsNullOrWhiteSpace(password) || password.Trim().Length < 4)
+            if (string.IsNullOrWhiteSpace(password) || password.Trim().Length < 4 || password.Trim().Length > 64)
             {
-                errorMessage = "La contraseña debe tener al menos 4 caracteres.";
+                errorMessage = "La contraseña debe tener entre 4 y 64 caracteres.";
                 return false;
             }
-
-            string cleanName = username.Trim();
 
             lock (_syncLock)
             {
@@ -237,7 +271,9 @@ namespace FractalTicTacToe.Core
                     }
 
                     PlayerProfile candidate = _accountsById[candidateEntry.PlayerId];
-                    int diff = Math.Abs(seeker.EloRating - candidate.EloRating);
+                    int seekerModeRating = seeker.GetRatingForTimeControl(timeControl);
+                    int candidateModeRating = candidate.GetRatingForTimeControl(timeControl);
+                    int diff = Math.Abs(seekerModeRating - candidateModeRating);
 
                     if (diff <= maxEloGap && diff < smallestDiff)
                     {
@@ -490,12 +526,22 @@ namespace FractalTicTacToe.Core
         /// </summary>
         public List<PlayerProfile> GetLeaderboard(int maxCount = 20)
         {
+            return GetLeaderboard(null, maxCount);
+        }
+
+        /// <summary>
+        /// Obtiene la tabla de clasificación ordenada por un modo de juego específico (<paramref name="modeFilter"/>) o general.
+        /// </summary>
+        public List<PlayerProfile> GetLeaderboard(TimeControlConfig? modeFilter, int maxCount = 20)
+        {
             lock (_syncLock)
             {
                 var list = new List<PlayerProfile>(_accountsById.Values);
                 list.Sort((a, b) =>
                 {
-                    int cmp = b.EloRating.CompareTo(a.EloRating);
+                    int eloA = modeFilter.HasValue ? a.GetRatingForTimeControl(modeFilter.Value) : a.EloRating;
+                    int eloB = modeFilter.HasValue ? b.GetRatingForTimeControl(modeFilter.Value) : b.EloRating;
+                    int cmp = eloB.CompareTo(eloA);
                     return cmp != 0 ? cmp : b.Wins.CompareTo(a.Wins);
                 });
 
@@ -530,7 +576,7 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Persiste en disco las cuentas de usuario (incluyendo hash de contraseña) y el historial de partidas concluidas.
+        /// Persiste en disco las cuentas de usuario (incluyendo hash de contraseña y puntajes por modo) y el historial de partidas concluidas.
         /// </summary>
         public void SaveToDirectory(string directoryPath)
         {
@@ -547,7 +593,8 @@ namespace FractalTicTacToe.Core
                 var sbAccounts = new StringBuilder();
                 foreach (PlayerProfile p in _accountsById.Values)
                 {
-                    sbAccounts.AppendLine($"{p.PlayerId}\t{p.Username}\t{p.EloRating}\t{p.Wins}\t{p.Losses}\t{p.Draws}\t{p.PasswordHash}");
+                    sbAccounts.AppendLine(
+                        $"{p.PlayerId}\t{p.Username}\t{p.EloRating}\t{p.Wins}\t{p.Losses}\t{p.Draws}\t{p.PasswordHash}\t{p.BulletElo}\t{p.BlitzElo}\t{p.RapidElo}");
                 }
                 File.WriteAllText(accountsFile, sbAccounts.ToString(), Encoding.UTF8);
 
@@ -587,15 +634,16 @@ namespace FractalTicTacToe.Core
                         string[] cols = line.Split('\t');
                         if (cols.Length < 6) continue;
 
-                        var profile = new PlayerProfile(
-                            cols[0],
-                            cols[1],
-                            int.TryParse(cols[2], out int elo) ? elo : EloRatingCalculator.DefaultInitialRating)
+                        int baseElo = int.TryParse(cols[2], out int elo) ? elo : EloRatingCalculator.DefaultInitialRating;
+                        var profile = new PlayerProfile(cols[0], cols[1], baseElo)
                         {
                             Wins = int.TryParse(cols[3], out int w) ? w : 0,
                             Losses = int.TryParse(cols[4], out int l) ? l : 0,
                             Draws = int.TryParse(cols[5], out int d) ? d : 0,
-                            PasswordHash = cols.Length >= 7 ? cols[6] : string.Empty
+                            PasswordHash = cols.Length >= 7 ? cols[6] : string.Empty,
+                            BulletElo = cols.Length >= 8 && int.TryParse(cols[7], out int bElo) ? bElo : baseElo,
+                            BlitzElo = cols.Length >= 9 && int.TryParse(cols[8], out int zElo) ? zElo : baseElo,
+                            RapidElo = cols.Length >= 10 && int.TryParse(cols[9], out int rElo) ? rElo : baseElo
                         };
 
                         _accountsById[profile.PlayerId] = profile;

@@ -24,8 +24,20 @@ jobs:
       with:
         dotnet-version: 8.0.x
 
+    - name: Fijar SDK .NET 8 en global.json (evitar conflicto con .NET 10 preinstalado)
+      run: |
+        cat << 'EOF' > global.json
+        {
+          "sdk": {
+            "version": "8.0.100",
+            "rollForward": "latestFeature"
+          }
+        }
+        EOF
+        dotnet --version
+
     - name: Instalar workload de .NET MAUI Android
-      run: dotnet workload install maui-android
+      run: dotnet workload install maui-android --skip-manifest-update
 
     - name: Verificar o generar Keystore de Firma
       run: |

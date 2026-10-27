@@ -72,10 +72,69 @@ namespace FractalTicTacToe.Core
         public string LocalPlayerId { get; private set; }
         public string LocalUsername { get; private set; }
         public int LocalElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public int LocalBulletElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public int LocalBlitzElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public int LocalRapidElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
         public string LocalRankTitle { get; private set; } = "Plata";
         public int LocalWins { get; private set; }
         public int LocalLosses { get; private set; }
         public int LocalDraws { get; private set; }
+
+        public int GetLocalEloForTimeControl(TimeControlConfig timeControl)
+        {
+            switch (timeControl.Category)
+            {
+                case TimeControlCategory.Bullet: return LocalBulletElo;
+                case TimeControlCategory.Blitz: return LocalBlitzElo;
+                case TimeControlCategory.Rapid: return LocalRapidElo;
+                default: return LocalElo;
+            }
+        }
+
+        private void SetLocalEloForTimeControl(TimeControlConfig timeControl, int newRating)
+        {
+            switch (timeControl.Category)
+            {
+                case TimeControlCategory.Bullet:
+                    LocalBulletElo = newRating;
+                    break;
+                case TimeControlCategory.Blitz:
+                    LocalBlitzElo = newRating;
+                    break;
+                case TimeControlCategory.Rapid:
+                    LocalRapidElo = newRating;
+                    break;
+            }
+            LocalElo = newRating;
+        }
+
+        /// <summary>
+        /// Carga inmediatamente los puntajes y estadísticas en caché del dispositivo durante el arranque
+        /// para evitar mostrar un "1200" falso antes de que responda el servidor.
+        /// </summary>
+        public void LoadCachedProfile(
+            string username,
+            int elo,
+            int bulletElo,
+            int blitzElo,
+            int rapidElo,
+            int wins,
+            int losses,
+            int draws)
+        {
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                LocalUsername = username.Trim();
+            }
+            LocalElo = elo > 0 ? elo : EloRatingCalculator.DefaultInitialRating;
+            LocalBulletElo = bulletElo > 0 ? bulletElo : LocalElo;
+            LocalBlitzElo = blitzElo > 0 ? blitzElo : LocalElo;
+            LocalRapidElo = rapidElo > 0 ? rapidElo : LocalElo;
+            LocalWins = Math.Max(0, wins);
+            LocalLosses = Math.Max(0, losses);
+            LocalDraws = Math.Max(0, draws);
+            LocalRankTitle = EloRatingCalculator.GetRankTitle(LocalElo);
+        }
 
         public string ActiveRoomId
         {
@@ -971,18 +1030,30 @@ namespace FractalTicTacToe.Core
             switch (evt)
             {
                 case MultiplayerProtocol.EvtAuthOk:
-                    // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>
+                    // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>|<bulletElo>|<blitzElo>|<rapidElo>
                     if (parts.Length >= 5)
                     {
                         LocalPlayerId = parts[1];
                         LocalUsername = parts[2];
-                        if (int.TryParse(parts[3], out int elo)) LocalElo = elo;
+                        if (int.TryParse(parts[3], out int elo))
+                        {
+                            LocalElo = elo;
+                            LocalBulletElo = elo;
+                            LocalBlitzElo = elo;
+                            LocalRapidElo = elo;
+                        }
                         LocalRankTitle = parts[4];
                         if (parts.Length >= 8)
                         {
                             if (int.TryParse(parts[5], out int w)) LocalWins = w;
                             if (int.TryParse(parts[6], out int l)) LocalLosses = l;
                             if (int.TryParse(parts[7], out int d)) LocalDraws = d;
+                        }
+                        if (parts.Length >= 11)
+                        {
+                            if (int.TryParse(parts[8], out int bElo)) LocalBulletElo = bElo;
+                            if (int.TryParse(parts[9], out int zElo)) LocalBlitzElo = zElo;
+                            if (int.TryParse(parts[10], out int rElo)) LocalRapidElo = rElo;
                         }
                         Authenticated?.Invoke(LocalUsername, LocalElo, LocalRankTitle);
 
@@ -1263,12 +1334,12 @@ namespace FractalTicTacToe.Core
 
                         if (endSession.AssignedRole == Player.X)
                         {
-                            LocalElo = newEloX;
+                            SetLocalEloForTimeControl(endSession.Clock.Config, newEloX);
                             endSession.OpponentElo = newEloO;
                         }
                         else if (endSession.AssignedRole == Player.O)
                         {
-                            LocalElo = newEloO;
+                            SetLocalEloForTimeControl(endSession.Clock.Config, newEloO);
                             endSession.OpponentElo = newEloX;
                         }
 

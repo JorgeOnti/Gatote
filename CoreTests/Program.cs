@@ -38,8 +38,10 @@ namespace CoreTests
             RunTest("24. Caída de Servidor sin Congelamiento y Salas Privadas por Código", TestServerCrashGracefulCancelAndPrivateRoomCode);
             RunTest("25. Tutorial Interactivo Aislado, Salida a Sala Online y GameLogger", TestInteractiveTutorialExitToOnlineAndLoggingSystem);
             RunTest("26. Reconexión Móvil de 20s (RESUME) y Limpieza de Reloj Inicial", TestMobileSessionGracePeriodResumeAndFirstMoveCountdownCleanup);
+            RunTest("27. Puntuación por Modo, Reloj Personalizado y Filtro de Fechas", TestPerModeRatingsCustomClockAndDateFilteredHistory);
+            RunTest("28. Ciberseguridad (PBKDF2, Sanitización) y Errores de Usuario", TestCybersecurityHardeningAndUserErrorEdgeCases);
 
-            Console.WriteLine("\n✔ ¡Las 26 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
+            Console.WriteLine("\n✔ ¡Las 28 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
             return 0;
         }
 
@@ -955,6 +957,216 @@ namespace CoreTests
                 Assert(client.ActiveRoomId == room2.RoomId && client.State.MoveCount == 0,
                     "Al regresar a la segunda partida, debe estar en su estado independiente (0 movimientos).");
             }
+        }
+
+        private static void TestPerModeRatingsCustomClockAndDateFilteredHistory()
+        {
+            // 1. Puntuación separada por modo de juego (Bullet, Blitz, Rápida)
+            var mm = new MatchmakingService();
+            Assert(mm.RegisterAccount("ModePlayerX", "pass1234", out PlayerProfile px, out _), "Registro ModePlayerX.");
+            Assert(mm.RegisterAccount("ModePlayerO", "pass1234", out PlayerProfile po, out _), "Registro ModePlayerO.");
+
+            Assert(px.BulletElo == 1200 && px.BlitzElo == 1200 && px.RapidElo == 1200,
+                "Los 3 modos deben iniciar en 1200 puntos.");
+
+            // Jugar una partida en modo Bullet 1+1 donde gana X por rendición de O (tras realizar el primer tiro)
+            var bulletRoom = new OnlineMatchRoom("ROOM-BULLET-1", px, po, TimeControlConfig.Bullet1Plus1);
+            Assert(bulletRoom.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento en sala Bullet.");
+            Assert(bulletRoom.Resign(po.PlayerId, out _), "Rendición en sala Bullet.");
+            Assert(px.BulletElo > 1200 && po.BulletElo < 1200,
+                "El puntaje Bullet debe cambiar tras una partida Bullet.");
+            Assert(px.BlitzElo == 1200 && px.RapidElo == 1200,
+                "Los puntajes Blitz y Rápida NO deben verse afectados por una partida Bullet.");
+
+            // Jugar una partida en modo Rápida 5+0 donde gana O por rendición de X
+            var rapidRoom = new OnlineMatchRoom("ROOM-RAPID-1", px, po, TimeControlConfig.Rapid5Plus0);
+            int bulletBeforeRapid = px.BulletElo;
+            Assert(rapidRoom.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento en sala Rápida.");
+            Assert(rapidRoom.Resign(px.PlayerId, out _), "Rendición en sala Rápida.");
+            Assert(px.RapidElo < 1200 && po.RapidElo > 1200,
+                "El puntaje Rápida debe actualizarse independientemente.");
+            Assert(px.BulletElo == bulletBeforeRapid && px.BlitzElo == 1200,
+                "Bullet y Blitz deben permanecer intactos tras la partida Rápida.");
+
+            // Verificar persistencia en disco de los 3 puntajes (BulletElo, BlitzElo, RapidElo)
+            string tempDir = Path.Combine(Path.GetTempPath(), "FractalModeRatings_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                mm.SaveToDirectory(tempDir);
+                var mmLoaded = new MatchmakingService();
+                mmLoaded.LoadFromDirectory(tempDir);
+                Assert(mmLoaded.AuthenticateAccount("ModePlayerX", "pass1234", out PlayerProfile loadedX, out _),
+                    "Debe autenticar ModePlayerX tras recargar de disco.");
+                Assert(loadedX.BulletElo == px.BulletElo && loadedX.BlitzElo == px.BlitzElo && loadedX.RapidElo == px.RapidElo,
+                    "Los puntajes por modo (Bullet, Blitz, Rápida) deben persistirse y cargarse exactamente igual.");
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+            }
+
+            // Verificar que el cliente carga caché instantáneo de perfil (sin parpadear en 1200) y sincroniza AUTH_OK con los 3 modos
+            using (var client = new OnlineMultiplayerClient())
+            {
+                client.LoadCachedProfile("ModePlayerX", 1310, 1420, 1310, 1180, 12, 5, 2);
+                Assert(client.LocalUsername == "ModePlayerX" &&
+                       client.LocalBulletElo == 1420 &&
+                       client.LocalBlitzElo == 1310 &&
+                       client.LocalRapidElo == 1180,
+                    "LoadCachedProfile debe precargar los puntajes reales antes de terminar la pantalla Splash.");
+
+                string authOkPacket = MultiplayerProtocol.BuildAuthOk(px);
+                client.ProcessServerPacket(authOkPacket);
+                Assert(client.LocalBulletElo == px.BulletElo &&
+                       client.LocalBlitzElo == px.BlitzElo &&
+                       client.LocalRapidElo == px.RapidElo,
+                    "AUTH_OK debe sincronizar los 3 puntajes por modo en el cliente.");
+            }
+
+            // 2. Reloj personalizado para 2 jugadores (minutos + incremento y sin tiempo)
+            TimeControlConfig customClock = TimeControlConfig.CreateCustom(7, 4);
+            Assert(Math.Abs(customClock.InitialSeconds - 420.0) < 0.01 && Math.Abs(customClock.IncrementSeconds - 4.0) < 0.01,
+                "CreateCustom(7, 4) debe configurar 420s iniciales y 4s de incremento.");
+            Assert(!customClock.IsUntimed && customClock.Category == TimeControlCategory.Rapid,
+                "7 min + 4s debe categorizarse como Rápida y tener reloj activo.");
+
+            TimeControlConfig untimedCustom = TimeControlConfig.CreateCustom(0, 5);
+            Assert(untimedCustom.IsUntimed && untimedCustom.Category == TimeControlCategory.Untimed,
+                "CreateCustom con <= 0 minutos debe devolver modo Sin Tiempo (Unlimited).");
+
+            TimeControlConfig clampedClock = TimeControlConfig.CreateCustom(500, 999);
+            Assert(Math.Abs(clampedClock.InitialSeconds - 180.0 * 60.0) < 0.01 && Math.Abs(clampedClock.IncrementSeconds - 60.0) < 0.01,
+                "CreateCustom debe limitar valores superiores al máximo a 180 min y 60 seg.");
+
+            // 3. Persistencia de partidas en disco y filtrado por fecha (Hoy, Última Semana, Último Mes, Todas)
+            DateTime nowUtc = new DateTime(2026, 10, 27, 15, 0, 0, DateTimeKind.Utc);
+            var recToday = new MatchRecord
+            {
+                MatchId = "M-TODAY",
+                PlayedAtUtc = nowUtc.AddHours(-2),
+                PlayerXName = "UserA",
+                PlayerOName = "UserB",
+                Winner = Player.X,
+                EndReason = MatchEndReason.SuddenDeathThreeInARow,
+                MoveTranscript = "B4C4 B4C0 B0C0"
+            };
+            var recFourDaysAgo = new MatchRecord
+            {
+                MatchId = "M-WEEK",
+                PlayedAtUtc = nowUtc.AddDays(-4),
+                PlayerXName = "UserA",
+                PlayerOName = "UserC",
+                Winner = Player.X,
+                EndReason = MatchEndReason.SuddenDeathThreeInARow,
+                MoveTranscript = "B4C4 B4C0 B0C0"
+            };
+            var recTwentyDaysAgo = new MatchRecord
+            {
+                MatchId = "M-MONTH",
+                PlayedAtUtc = nowUtc.AddDays(-20),
+                PlayerXName = "UserA",
+                PlayerOName = "UserD",
+                Winner = Player.O,
+                EndReason = MatchEndReason.Timeout,
+                MoveTranscript = "B4C4 B4C0 B0C0 B0C1"
+            };
+            var recOld = new MatchRecord
+            {
+                MatchId = "M-OLD",
+                PlayedAtUtc = nowUtc.AddDays(-65),
+                PlayerXName = "UserA",
+                PlayerOName = "UserE",
+                Winner = Player.None,
+                EndReason = MatchEndReason.GlobalDraw,
+                MoveTranscript = "B4C4 B4C0"
+            };
+
+            var allMatches = new System.Collections.Generic.List<MatchRecord> { recToday, recFourDaysAgo, recTwentyDaysAgo, recOld };
+
+            string historyFile = Path.Combine(Path.GetTempPath(), "recorded_matches_" + Guid.NewGuid().ToString("N") + ".pgn");
+            try
+            {
+                MatchRecord.SaveHistoryToFile(historyFile, allMatches);
+                var diskMatches = MatchRecord.LoadHistoryFromFile(historyFile);
+                Assert(diskMatches.Count == 4 && diskMatches[0].MatchId == "M-TODAY" && diskMatches[3].MatchId == "M-OLD",
+                    "Las partidas guardadas deben persistir en disco al cerrar y volver a abrir la aplicación.");
+
+                Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.Today, nowUtc).Count == 1,
+                    "El filtro 'Hoy' debe devolver solo la partida de hoy (1).");
+                Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.LastWeek, nowUtc).Count == 2,
+                    "El filtro 'Última Semana' debe devolver las partidas de los últimos 7 días (2).");
+                Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.LastMonth, nowUtc).Count == 3,
+                    "El filtro 'Último Mes' debe devolver las partidas de los últimos 30 días (3).");
+                Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.All, nowUtc).Count == 4,
+                    "El filtro 'Todas' debe devolver las 4 partidas.");
+            }
+            finally
+            {
+                if (File.Exists(historyFile)) File.Delete(historyFile);
+            }
+        }
+
+        private static void TestCybersecurityHardeningAndUserErrorEdgeCases()
+        {
+            // 1. Hashing seguro PBKDF2-SHA256 con sal aleatoria y retrocompatibilidad SHA-256
+            string hash1 = PlayerProfile.ComputeSecurePbkdf2Hash("MiClaveSegura#2026");
+            string hash2 = PlayerProfile.ComputeSecurePbkdf2Hash("MiClaveSegura#2026");
+            Assert(hash1.StartsWith("pbkdf2$", StringComparison.OrdinalIgnoreCase),
+                "El hash de contraseña debe usar formato PBKDF2 con sal.");
+            Assert(hash1 != hash2,
+                "Dos hashes PBKDF2 de la misma contraseña deben ser distintos gracias a la sal criptográfica aleatoria.");
+
+            var profile = new PlayerProfile("SecId", "SecUser", 1200);
+            profile.SetPassword("MiClaveSegura#2026");
+            Assert(profile.VerifyPassword("MiClaveSegura#2026"), "VerifyPassword debe aceptar la contraseña correcta.");
+            Assert(!profile.VerifyPassword("MiClaveSegura#2025"), "VerifyPassword debe rechazar contraseñas incorrectas.");
+            Assert(!profile.VerifyPassword(""), "VerifyPassword debe rechazar contraseña vacía.");
+
+            // Verificar retrocompatibilidad y migración automática desde SHA-256 legado
+            string legacySha = PlayerProfile.ComputePasswordHash("ClaveAntigua123");
+            var legacyProfile = new PlayerProfile("LegacyId", "LegacyUser", 1300) { PasswordHash = legacySha };
+            Assert(legacyProfile.VerifyPassword("ClaveAntigua123"),
+                "VerifyPassword debe seguir aceptando cuentas existentes con hash SHA-256 legado.");
+
+            // 2. Validación estricta de nombres de usuario contra inyección de protocolo o caracteres inválidos
+            var mm = new MatchmakingService();
+            Assert(!mm.RegisterAccount("ab", "pass1234", out _, out _),
+                "No debe permitir usuario de menos de 3 caracteres.");
+            Assert(!mm.RegisterAccount("UsuarioDemasiadoLargo12345", "pass1234", out _, out _),
+                "No debe permitir usuario de más de 18 caracteres.");
+            Assert(!mm.RegisterAccount("bad|user", "pass1234", out _, out _),
+                "No debe permitir el delimitador de protocolo '|' en el nombre de usuario.");
+            Assert(!mm.RegisterAccount("bad\tuser", "pass1234", out _, out _),
+                "No debe permitir tabuladores en el nombre de usuario.");
+            Assert(!mm.RegisterAccount("bad;drop", "pass1234", out _, out _),
+                "No debe permitir punto y coma ni sintaxis de inyección en el nombre de usuario.");
+            Assert(!mm.RegisterAccount("<script>", "pass1234", out _, out _),
+                "No debe permitir etiquetas o caracteres especiales de inyección.");
+            Assert(mm.RegisterAccount("Jugador_Valido-01", "pass1234", out _, out _),
+                "Debe permitir letras, números, guion y guion bajo.");
+
+            // 3. Sanitización de paquetes de red y límite de longitud (MaxPacketLength)
+            string dirtyText = "Hola|Mundo\r\n\tFin";
+            string cleanText = MultiplayerProtocol.Sanitize(dirtyText);
+            Assert(!cleanText.Contains("|") && !cleanText.Contains("\r") && !cleanText.Contains("\n") && !cleanText.Contains("\t"),
+                "MultiplayerProtocol.Sanitize debe neutralizar '|', '\\r', '\\n' y '\\t'.");
+
+            string oversizedPacket = "LOGIN|" + new string('A', MultiplayerProtocol.MaxPacketLength + 500);
+            string[] splitOversized = MultiplayerProtocol.SplitPacket(oversizedPacket);
+            int totalChars = 0;
+            foreach (string p in splitOversized) totalChars += p.Length;
+            Assert(totalChars <= MultiplayerProtocol.MaxPacketLength,
+                "SplitPacket debe truncar paquetes que excedan MaxPacketLength para prevenir ataques DoS de memoria.");
+
+            // 4. Casos borde de errores comunes de usuario (tocar fuera de turno, casilla ocupada, código inválido)
+            var session = new GameSessionController(SessionMode.PassAndPlay2P, BotDifficulty.Medium, timeControl: TimeControlConfig.CreateCustom(3, 2));
+            Assert(session.TryPlayHumanMove(4, 0), "Primer tiro válido en (4,0).");
+            Assert(!session.TryPlayHumanMove(4, 0), "Error de usuario: intentar tocar la misma casilla ocupada (4,0) o tablero incorrecto debe ser rechazado limpiamente.");
+            Assert(!session.TryPlayHumanMove(3, 3), "Error de usuario: intentar tocar el tablero 3 cuando el tablero forzado es el 0 debe ser rechazado.");
+            Assert(session.TryPlayHumanMove(0, 4), "Tiro válido en el tablero forzado 0, casilla 4.");
+
+            Assert(mm.JoinPrivateLobby("id-inexistente", "ZZZZ", out string joinErr) == null && !string.IsNullOrEmpty(joinErr),
+                "Error de usuario: ingresar un código de sala privada inexistente debe devolver null y un mensaje claro sin lanzar excepción.");
         }
 
         private static string BuildFenFromCells(Player[] cells, Player turn, int activeBoard)

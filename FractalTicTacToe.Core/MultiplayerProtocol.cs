@@ -73,13 +73,15 @@ namespace FractalTicTacToe.Core
         public static string BuildRematchResponse(string roomId, bool accept) =>
             $"{CmdRematchRespond}|{roomId}|{(accept ? "ACCEPT" : "DECLINE")}";
 
+        public const int MaxPacketLength = 2048;
+
         public static string BuildAuthOk(PlayerProfile profile) =>
             $"{EvtAuthOk}|{profile.PlayerId}|{profile.Username}|{profile.EloRating}|{profile.RankTitle}|" +
-            $"{profile.Wins}|{profile.Losses}|{profile.Draws}";
+            $"{profile.Wins}|{profile.Losses}|{profile.Draws}|{profile.BulletElo}|{profile.BlitzElo}|{profile.RapidElo}";
 
         public static string BuildMatchStart(OnlineMatchRoom room, Player assignedRole) =>
-            $"{EvtMatchStart}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.EloRating}|" +
-            $"{room.PlayerO.Username}|{room.PlayerO.EloRating}|{GameSerializer.ToFen(room.State)}|{room.TimeControl.ToCode()}";
+            $"{EvtMatchStart}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.GetRatingForTimeControl(room.TimeControl)}|" +
+            $"{room.PlayerO.Username}|{room.PlayerO.GetRatingForTimeControl(room.TimeControl)}|{GameSerializer.ToFen(room.State)}|{room.TimeControl.ToCode()}";
 
         public static string BuildStateSync(OnlineMatchRoom room, Move lastMove) =>
             $"{EvtStateSync}|{room.RoomId}|{lastMove.BoardIndex}|{lastMove.CellIndex}|" +
@@ -119,8 +121,8 @@ namespace FractalTicTacToe.Core
             $"{CmdResume}|{Sanitize(username)}|{Sanitize(password)}|{Sanitize(roomId)}";
 
         public static string BuildSessionResumed(OnlineMatchRoom room, Player assignedRole) =>
-            $"{EvtSessionResumed}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.EloRating}|" +
-            $"{room.PlayerO.Username}|{room.PlayerO.EloRating}|{GameSerializer.ToFen(room.State)}|" +
+            $"{EvtSessionResumed}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.GetRatingForTimeControl(room.TimeControl)}|" +
+            $"{room.PlayerO.Username}|{room.PlayerO.GetRatingForTimeControl(room.TimeControl)}|{GameSerializer.ToFen(room.State)}|" +
             $"{GameSerializer.ExportMoveHistory(room.State)}|{room.TimeControl.ToCode()}";
 
         public static string BuildAccountDeleted(string username) =>
@@ -130,16 +132,21 @@ namespace FractalTicTacToe.Core
 
         public static string[] SplitPacket(string rawLine)
         {
-            if (string.IsNullOrWhiteSpace(rawLine))
+            if (string.IsNullOrWhiteSpace(rawLine) || rawLine.Length > MaxPacketLength)
             {
                 return Array.Empty<string>();
             }
             return rawLine.Trim().Split('|');
         }
 
-        private static string Sanitize(string text)
+        public static string Sanitize(string text)
         {
-            return (text ?? string.Empty).Replace("|", "/").Replace("\r", " ").Replace("\n", " ").Trim();
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
+            }
+            string s = text.Replace("|", "/").Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Replace("\0", "").Trim();
+            return s.Length > 256 ? s.Substring(0, 256) : s;
         }
     }
 }
