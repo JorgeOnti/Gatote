@@ -450,9 +450,25 @@ namespace FractalTicTacToe.Core
         {
             activeRoom = null;
             role = Player.None;
+            List<OnlineMatchRoom> rooms = GetActiveRoomsForPlayer(playerId);
+            if (rooms.Count > 0)
+            {
+                activeRoom = rooms[rooms.Count - 1];
+                role = activeRoom.GetPlayerRole(playerId);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Devuelve todas las salas en línea activas (no concluidas) en las que participa actualmente <paramref name="playerId"/>.
+        /// </summary>
+        public List<OnlineMatchRoom> GetActiveRoomsForPlayer(string playerId)
+        {
+            var result = new List<OnlineMatchRoom>();
             if (string.IsNullOrEmpty(playerId))
             {
-                return false;
+                return result;
             }
 
             lock (_syncLock)
@@ -460,16 +476,13 @@ namespace FractalTicTacToe.Core
                 foreach (OnlineMatchRoom room in _activeRooms.Values)
                 {
                     if (room.IsMatchOver) continue;
-                    Player r = room.GetPlayerRole(playerId);
-                    if (r != Player.None)
+                    if (room.GetPlayerRole(playerId) != Player.None)
                     {
-                        activeRoom = room;
-                        role = r;
-                        return true;
+                        result.Add(room);
                     }
                 }
             }
-            return false;
+            return result;
         }
 
         /// <summary>

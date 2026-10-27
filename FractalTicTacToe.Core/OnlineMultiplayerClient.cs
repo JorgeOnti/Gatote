@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
 using System.Net.WebSockets;
@@ -8,6 +9,35 @@ using System.Threading.Tasks;
 
 namespace FractalTicTacToe.Core
 {
+    /// <summary>
+    /// Representa el estado local de una sala en línea específica en la que participa el jugador,
+    /// permitiendo mantener múltiples partidas en línea simultáneas en el recuadro de Partidas Activas.
+    /// </summary>
+    public sealed class ClientOnlineRoomSession
+    {
+        public string RoomId { get; set; }
+        public Player AssignedRole { get; set; } = Player.None;
+        public string OpponentUsername { get; set; }
+        public int OpponentElo { get; set; } = EloRatingCalculator.DefaultInitialRating;
+        public GameState State { get; set; } = new GameState();
+        public MatchClock Clock { get; } = new MatchClock(TimeControlConfig.Blitz3Plus2);
+        public Move? LastNetworkMove { get; set; }
+        public EloMatchUpdate? LastRatingUpdate { get; set; }
+        public MatchEndReason LastEndReason { get; set; } = MatchEndReason.InProgress;
+        public bool HasIncomingTakebackOffer { get; set; }
+        public Player IncomingTakebackRequester { get; set; }
+        public int IncomingTakebackPlies { get; set; }
+        public bool IsWaitingForOpponentTakebackResponse { get; set; }
+        public bool HasRequestedRematch { get; set; }
+        public bool HasOpponentOfferedRematch { get; set; }
+        public bool RematchDeclinedByOpponent { get; set; }
+
+        public bool IsActive =>
+            !string.IsNullOrEmpty(RoomId) &&
+            !State.IsGameOver &&
+            !Clock.IsAbortedByFirstMoveTimeout;
+    }
+
     /// <summary>
     /// Cliente de red asíncrono para conectarse al servidor autoritativo <c>FractalTicTacToe.Server</c>.
     /// Gestiona autenticación (Login y Registro), cola de Matchmaking filtrada por control de tiempo,
@@ -25,6 +55,9 @@ namespace FractalTicTacToe.Core
         private StreamWriter _writer;
         private CancellationTokenSource _receiveCts;
         private readonly object _sendLock = new object();
+        private readonly object _roomsLock = new object();
+        private readonly Dictionary<string, ClientOnlineRoomSession> _roomsById = new Dictionary<string, ClientOnlineRoomSession>();
+        private ClientOnlineRoomSession _focusedRoom = new ClientOnlineRoomSession();
         private volatile bool _intentionalDisconnect;
         private volatile bool _handlingUnexpectedDisconnect;
 
@@ -44,26 +77,141 @@ namespace FractalTicTacToe.Core
         public int LocalLosses { get; private set; }
         public int LocalDraws { get; private set; }
 
-        public string ActiveRoomId { get; private set; }
-        public Player AssignedRole { get; private set; } = Player.None;
-        public string OpponentUsername { get; private set; }
-        public int OpponentElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public string ActiveRoomId
+        {
+            get => _focusedRoom.RoomId;
+            private set => _focusedRoom.RoomId = value;
+        }
+        public Player AssignedRole
+        {
+            get => _focusedRoom.AssignedRole;
+            private set => _focusedRoom.AssignedRole = value;
+        }
+        public string OpponentUsername
+        {
+            get => _focusedRoom.OpponentUsername;
+            private set => _focusedRoom.OpponentUsername = value;
+        }
+        public int OpponentElo
+        {
+            get => _focusedRoom.OpponentElo;
+            private set => _focusedRoom.OpponentElo = value;
+        }
 
-        public GameState State { get; private set; } = new GameState();
-        public MatchClock Clock { get; } = new MatchClock(TimeControlConfig.Blitz3Plus2);
-        public Move? LastNetworkMove { get; private set; }
-        public EloMatchUpdate? LastRatingUpdate { get; private set; }
-        public MatchEndReason LastEndReason { get; private set; } = MatchEndReason.InProgress;
+        public GameState State
+        {
+            get => _focusedRoom.State;
+            private set => _focusedRoom.State = value;
+        }
+        public MatchClock Clock => _focusedRoom.Clock;
+        public Move? LastNetworkMove
+        {
+            get => _focusedRoom.LastNetworkMove;
+            private set => _focusedRoom.LastNetworkMove = value;
+        }
+        public EloMatchUpdate? LastRatingUpdate
+        {
+            get => _focusedRoom.LastRatingUpdate;
+            private set => _focusedRoom.LastRatingUpdate = value;
+        }
+        public MatchEndReason LastEndReason
+        {
+            get => _focusedRoom.LastEndReason;
+            private set => _focusedRoom.LastEndReason = value;
+        }
         public MatchRecord LastCompletedMatchRecord { get; private set; }
 
-        public bool HasIncomingTakebackOffer { get; private set; }
-        public Player IncomingTakebackRequester { get; private set; }
-        public int IncomingTakebackPlies { get; private set; }
-        public bool IsWaitingForOpponentTakebackResponse { get; private set; }
+        public bool HasIncomingTakebackOffer
+        {
+            get => _focusedRoom.HasIncomingTakebackOffer;
+            private set => _focusedRoom.HasIncomingTakebackOffer = value;
+        }
+        public Player IncomingTakebackRequester
+        {
+            get => _focusedRoom.IncomingTakebackRequester;
+            private set => _focusedRoom.IncomingTakebackRequester = value;
+        }
+        public int IncomingTakebackPlies
+        {
+            get => _focusedRoom.IncomingTakebackPlies;
+            private set => _focusedRoom.IncomingTakebackPlies = value;
+        }
+        public bool IsWaitingForOpponentTakebackResponse
+        {
+            get => _focusedRoom.IsWaitingForOpponentTakebackResponse;
+            private set => _focusedRoom.IsWaitingForOpponentTakebackResponse = value;
+        }
 
-        public bool HasRequestedRematch { get; private set; }
-        public bool HasOpponentOfferedRematch { get; private set; }
-        public bool RematchDeclinedByOpponent { get; private set; }
+        public bool HasRequestedRematch
+        {
+            get => _focusedRoom.HasRequestedRematch;
+            private set => _focusedRoom.HasRequestedRematch = value;
+        }
+        public bool HasOpponentOfferedRematch
+        {
+            get => _focusedRoom.HasOpponentOfferedRematch;
+            private set => _focusedRoom.HasOpponentOfferedRematch = value;
+        }
+        public bool RematchDeclinedByOpponent
+        {
+            get => _focusedRoom.RematchDeclinedByOpponent;
+            private set => _focusedRoom.RematchDeclinedByOpponent = value;
+        }
+
+        /// <summary>
+        /// Devuelve todas las partidas en línea activas (no terminadas) en las que participa el jugador.
+        /// </summary>
+        public List<ClientOnlineRoomSession> GetActiveRooms()
+        {
+            var list = new List<ClientOnlineRoomSession>();
+            lock (_roomsLock)
+            {
+                foreach (ClientOnlineRoomSession room in _roomsById.Values)
+                {
+                    if (room.IsActive)
+                    {
+                        list.Add(room);
+                    }
+                }
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Cambia la sala en línea enfocada actualmente en el tablero por su <paramref name="roomId"/>.
+        /// </summary>
+        public bool SwitchActiveRoom(string roomId)
+        {
+            if (string.IsNullOrWhiteSpace(roomId)) return false;
+            lock (_roomsLock)
+            {
+                if (_roomsById.TryGetValue(roomId, out ClientOnlineRoomSession session))
+                {
+                    _focusedRoom = session;
+                    StateChanged?.Invoke();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private ClientOnlineRoomSession GetOrCreateRoomSession(string roomId)
+        {
+            if (string.IsNullOrWhiteSpace(roomId))
+            {
+                return _focusedRoom;
+            }
+
+            lock (_roomsLock)
+            {
+                if (!_roomsById.TryGetValue(roomId, out ClientOnlineRoomSession session))
+                {
+                    session = new ClientOnlineRoomSession { RoomId = roomId };
+                    _roomsById[roomId] = session;
+                }
+                return session;
+            }
+        }
 
         private bool _pendingQueueAfterAuth;
         private TimeControlConfig _pendingQueueTimeControl = TimeControlConfig.Blitz3Plus2;
@@ -283,7 +431,11 @@ namespace FractalTicTacToe.Core
         public void CreatePrivateLobby(TimeControlConfig timeControl)
         {
             if (!IsConnected || !IsAuthenticated) return;
-            Clock.Reset(timeControl);
+            _pendingQueueTimeControl = timeControl;
+            if (!IsInActiveMatch)
+            {
+                Clock.Reset(timeControl);
+            }
             IsInQueue = false;
             PendingInviteCode = "...";
             SendRawLine(MultiplayerProtocol.BuildCreatePrivate(timeControl.ToCode()));
@@ -316,10 +468,14 @@ namespace FractalTicTacToe.Core
         public void JoinMatchmakingQueue(TimeControlConfig timeControl, int maxEloGap = 400)
         {
             if (!IsConnected) return;
-            Clock.Reset(timeControl);
-            HasRequestedRematch = false;
-            HasOpponentOfferedRematch = false;
-            RematchDeclinedByOpponent = false;
+            _pendingQueueTimeControl = timeControl;
+            if (!IsInActiveMatch)
+            {
+                Clock.Reset(timeControl);
+                HasRequestedRematch = false;
+                HasOpponentOfferedRematch = false;
+                RematchDeclinedByOpponent = false;
+            }
             IsInQueue = true;
 
             if (!IsAuthenticated)
@@ -464,35 +620,41 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
-        /// Actualiza el temporizador de 30s de primer movimiento o el reloj principal en curso.
+        /// Actualiza el temporizador de 30s de primer movimiento o el reloj principal en curso
+        /// para todas las salas en línea activas del jugador.
         /// Notifica automáticamente al servidor si expira los 30s sin primer tiro (ABORT) o si el reloj llega a 0 (TIMEOUT).
         /// </summary>
         public bool TickClock(double deltaSeconds)
         {
-            if (!IsInActiveMatch)
+            List<ClientOnlineRoomSession> activeRooms = GetActiveRooms();
+            if (activeRooms.Count == 0)
             {
                 return false;
             }
 
-            bool expired = Clock.Tick(deltaSeconds);
-            if (expired)
+            bool anyExpired = false;
+            foreach (ClientOnlineRoomSession room in activeRooms)
             {
-                if (Clock.IsAbortedByFirstMoveTimeout)
+                bool expired = room.Clock.Tick(deltaSeconds);
+                if (expired)
                 {
-                    // Bloquear inmediatamente el tablero local al vencer los 30s sin primer movimiento
-                    State.ForceConclude(Player.None);
-                    LastEndReason = MatchEndReason.Aborted;
-                    Clock.Pause();
-                    SendRawLine(MultiplayerProtocol.BuildAbort(ActiveRoomId));
-                    StateChanged?.Invoke();
-                }
-                else if (Clock.FlaggedPlayer == AssignedRole)
-                {
-                    SendRawLine(MultiplayerProtocol.BuildTimeout(ActiveRoomId));
+                    anyExpired = true;
+                    if (room.Clock.IsAbortedByFirstMoveTimeout)
+                    {
+                        room.State.ForceConclude(Player.None);
+                        room.LastEndReason = MatchEndReason.Aborted;
+                        room.Clock.Pause();
+                        SendRawLine(MultiplayerProtocol.BuildAbort(room.RoomId));
+                        StateChanged?.Invoke();
+                    }
+                    else if (room.Clock.FlaggedPlayer == room.AssignedRole)
+                    {
+                        SendRawLine(MultiplayerProtocol.BuildTimeout(room.RoomId));
+                    }
                 }
             }
 
-            return expired;
+            return anyExpired;
         }
 
         public void RequestLeaderboard()
@@ -553,12 +715,15 @@ namespace FractalTicTacToe.Core
             LocalPlayerId = null;
             IsInQueue = false;
             PendingInviteCode = null;
-            ActiveRoomId = null;
-            HasIncomingTakebackOffer = false;
-            IsWaitingForOpponentTakebackResponse = false;
-            HasRequestedRematch = false;
-            HasOpponentOfferedRematch = false;
-            Clock.Pause();
+            lock (_roomsLock)
+            {
+                foreach (ClientOnlineRoomSession r in _roomsById.Values)
+                {
+                    r.Clock.Pause();
+                }
+                _roomsById.Clear();
+                _focusedRoom = new ClientOnlineRoomSession();
+            }
         }
 
         /// <summary>
@@ -611,6 +776,22 @@ namespace FractalTicTacToe.Core
             bool hadActiveMatch = !string.IsNullOrEmpty(ActiveRoomId) && !State.IsGameOver;
             IsInQueue = false;
             PendingInviteCode = null;
+
+            lock (_roomsLock)
+            {
+                foreach (ClientOnlineRoomSession r in _roomsById.Values)
+                {
+                    r.Clock.Pause();
+                    if (!r.State.IsGameOver)
+                    {
+                        r.State.ForceConclude(Player.None);
+                        r.LastRatingUpdate = null;
+                        r.LastEndReason = MatchEndReason.Aborted;
+                    }
+                }
+                _roomsById.Clear();
+            }
+
             ActiveRoomId = null;
             HasIncomingTakebackOffer = false;
             IsWaitingForOpponentTakebackResponse = false;
@@ -847,51 +1028,58 @@ namespace FractalTicTacToe.Core
                     {
                         IsInQueue = false;
                         PendingInviteCode = null;
-                        HasIncomingTakebackOffer = false;
-                        IsWaitingForOpponentTakebackResponse = false;
-                        HasRequestedRematch = false;
-                        HasOpponentOfferedRematch = false;
-                        RematchDeclinedByOpponent = false;
-                        LastNetworkMove = null;
-                        LastRatingUpdate = null;
-                        LastEndReason = MatchEndReason.InProgress;
+
+                        ClientOnlineRoomSession startSession = GetOrCreateRoomSession(parts[1]);
+                        lock (_roomsLock)
+                        {
+                            _focusedRoom = startSession;
+                        }
+
+                        startSession.HasIncomingTakebackOffer = false;
+                        startSession.IsWaitingForOpponentTakebackResponse = false;
+                        startSession.HasRequestedRematch = false;
+                        startSession.HasOpponentOfferedRematch = false;
+                        startSession.RematchDeclinedByOpponent = false;
+                        startSession.LastNetworkMove = null;
+                        startSession.LastRatingUpdate = null;
+                        startSession.LastEndReason = MatchEndReason.InProgress;
 
                         TimeControlConfig roomTimeControl = parts.Length >= 9
                             ? TimeControlConfig.FromCode(parts[8])
-                            : Clock.Config;
+                            : _pendingQueueTimeControl;
 
-                        Clock.Reset(roomTimeControl);
+                        startSession.Clock.Reset(roomTimeControl);
                         // REGLA ESTILO LICHESS: El reloj principal NO corre hasta el primer movimiento;
                         // hay 30 segundos para realizar el primer tiro o la partida se cancela.
-                        Clock.StartFirstMoveCountdown(MatchClock.FirstMoveAbortLimitSeconds);
+                        startSession.Clock.StartFirstMoveCountdown(MatchClock.FirstMoveAbortLimitSeconds);
 
-                        ActiveRoomId = parts[1];
+                        startSession.RoomId = parts[1];
                         Enum.TryParse(parts[2], ignoreCase: true, out Player role);
-                        AssignedRole = role;
+                        startSession.AssignedRole = role;
 
                         string userX = parts[3];
                         int.TryParse(parts[4], out int eloX);
                         string userO = parts[5];
                         int.TryParse(parts[6], out int eloO);
 
-                        if (AssignedRole == Player.X)
+                        if (startSession.AssignedRole == Player.X)
                         {
                             LocalUsername = userX;
                             LocalElo = eloX;
-                            OpponentUsername = userO;
-                            OpponentElo = eloO;
+                            startSession.OpponentUsername = userO;
+                            startSession.OpponentElo = eloO;
                         }
                         else
                         {
                             LocalUsername = userO;
                             LocalElo = eloO;
-                            OpponentUsername = userX;
-                            OpponentElo = eloX;
+                            startSession.OpponentUsername = userX;
+                            startSession.OpponentElo = eloX;
                         }
 
-                        State = GameSerializer.FromFen(parts[7]);
-                        GameLogger.Info("MATCH", $"Partida en línea iniciada: Sala {ActiveRoomId}, Rol [{AssignedRole}], {userX} vs {userO} ({roomTimeControl.Name}).");
-                        MatchStarted?.Invoke(ActiveRoomId, AssignedRole, userX, eloX, userO, eloO);
+                        startSession.State = GameSerializer.FromFen(parts[7]);
+                        GameLogger.Info("MATCH", $"Partida en línea iniciada: Sala {startSession.RoomId}, Rol [{startSession.AssignedRole}], {userX} vs {userO} ({roomTimeControl.Name}).");
+                        MatchStarted?.Invoke(startSession.RoomId, startSession.AssignedRole, userX, eloX, userO, eloO);
                         StateChanged?.Invoke();
                     }
                     break;
@@ -902,47 +1090,63 @@ namespace FractalTicTacToe.Core
                     {
                         IsInQueue = false;
                         PendingInviteCode = null;
-                        ActiveRoomId = parts[1];
+
+                        ClientOnlineRoomSession resumedSession = GetOrCreateRoomSession(parts[1]);
+                        lock (_roomsLock)
+                        {
+                            _focusedRoom = resumedSession;
+                        }
+
+                        resumedSession.RoomId = parts[1];
                         Enum.TryParse(parts[2], ignoreCase: true, out Player resumedRole);
-                        AssignedRole = resumedRole;
+                        resumedSession.AssignedRole = resumedRole;
 
                         string rUserX = parts[3];
                         int.TryParse(parts[4], out int rEloX);
                         string rUserO = parts[5];
                         int.TryParse(parts[6], out int rEloO);
 
-                        if (AssignedRole == Player.X)
+                        if (resumedSession.AssignedRole == Player.X)
                         {
                             LocalUsername = rUserX;
                             LocalElo = rEloX;
-                            OpponentUsername = rUserO;
-                            OpponentElo = rEloO;
+                            resumedSession.OpponentUsername = rUserO;
+                            resumedSession.OpponentElo = rEloO;
                         }
                         else
                         {
                             LocalUsername = rUserO;
                             LocalElo = rEloO;
-                            OpponentUsername = rUserX;
-                            OpponentElo = rEloX;
+                            resumedSession.OpponentUsername = rUserX;
+                            resumedSession.OpponentElo = rEloX;
+                        }
+
+                        if (parts.Length >= 10 && !string.IsNullOrWhiteSpace(parts[9]))
+                        {
+                            resumedSession.Clock.Reset(TimeControlConfig.FromCode(parts[9]));
                         }
 
                         if (!string.IsNullOrWhiteSpace(parts[8]))
                         {
-                            State = GameSerializer.ImportMoveHistory(parts[8]);
+                            resumedSession.State = GameSerializer.ImportMoveHistory(parts[8]);
                         }
                         else
                         {
-                            State = GameSerializer.FromFen(parts[7]);
+                            resumedSession.State = GameSerializer.FromFen(parts[7]);
                         }
 
-                        LastNetworkMove = State.GetLastMove();
-                        if (State.MoveCount > 0 && !State.IsGameOver)
+                        resumedSession.LastNetworkMove = resumedSession.State.GetLastMove();
+                        if (resumedSession.State.MoveCount > 0 && !resumedSession.State.IsGameOver)
                         {
-                            Clock.Start(State.CurrentPlayer);
+                            resumedSession.Clock.Start(resumedSession.State.CurrentPlayer);
+                        }
+                        else if (resumedSession.State.MoveCount == 0 && !resumedSession.State.IsGameOver)
+                        {
+                            resumedSession.Clock.StartFirstMoveCountdown(MatchClock.FirstMoveAbortLimitSeconds);
                         }
 
-                        SessionResumed?.Invoke(ActiveRoomId);
-                        GameLogger.Info("NET", $"Sesión reanudada en sala {ActiveRoomId} con rol [{AssignedRole}].");
+                        SessionResumed?.Invoke(resumedSession.RoomId);
+                        GameLogger.Info("NET", $"Sesión reanudada en sala {resumedSession.RoomId} con rol [{resumedSession.AssignedRole}].");
                         StateChanged?.Invoke();
                     }
                     break;
@@ -951,25 +1155,26 @@ namespace FractalTicTacToe.Core
                     // STATE_SYNC|<roomId>|<lastBoard>|<lastCell>|<fen>|<movesTranscript>
                     if (parts.Length >= 5)
                     {
-                        HasIncomingTakebackOffer = false;
-                        IsWaitingForOpponentTakebackResponse = false;
+                        ClientOnlineRoomSession syncSession = GetOrCreateRoomSession(parts[1]);
+                        syncSession.HasIncomingTakebackOffer = false;
+                        syncSession.IsWaitingForOpponentTakebackResponse = false;
 
                         if (int.TryParse(parts[2], out int b) && int.TryParse(parts[3], out int c))
                         {
-                            LastNetworkMove = new Move(b, c);
+                            syncSession.LastNetworkMove = new Move(b, c);
                         }
 
                         if (parts.Length >= 6 && !string.IsNullOrWhiteSpace(parts[5]))
                         {
-                            State = GameSerializer.ImportMoveHistory(parts[5]);
+                            syncSession.State = GameSerializer.ImportMoveHistory(parts[5]);
                         }
                         else
                         {
-                            State = GameSerializer.FromFen(parts[4]);
+                            syncSession.State = GameSerializer.FromFen(parts[4]);
                         }
 
-                        Player mover = State.CurrentPlayer == Player.X ? Player.O : Player.X;
-                        Clock.OnMoveCompleted(mover, State.CurrentPlayer);
+                        Player mover = syncSession.State.CurrentPlayer == Player.X ? Player.O : Player.X;
+                        syncSession.Clock.OnMoveCompleted(mover, syncSession.State.CurrentPlayer);
                         StateChanged?.Invoke();
                     }
                     break;
@@ -978,19 +1183,20 @@ namespace FractalTicTacToe.Core
                     // TAKEBACK_OFFERED|<roomId>|<requesterRole>|<pliesToUndo>
                     if (parts.Length >= 4)
                     {
+                        ClientOnlineRoomSession tbSession = GetOrCreateRoomSession(parts[1]);
                         Enum.TryParse(parts[2], ignoreCase: true, out Player reqRole);
                         int.TryParse(parts[3], out int plies);
 
-                        if (reqRole != AssignedRole)
+                        if (reqRole != tbSession.AssignedRole)
                         {
-                            HasIncomingTakebackOffer = true;
-                            IncomingTakebackRequester = reqRole;
-                            IncomingTakebackPlies = plies;
+                            tbSession.HasIncomingTakebackOffer = true;
+                            tbSession.IncomingTakebackRequester = reqRole;
+                            tbSession.IncomingTakebackPlies = plies;
                             TakebackOfferedByOpponent?.Invoke(reqRole, plies);
                         }
                         else
                         {
-                            IsWaitingForOpponentTakebackResponse = true;
+                            tbSession.IsWaitingForOpponentTakebackResponse = true;
                         }
 
                         StateChanged?.Invoke();
@@ -1001,21 +1207,22 @@ namespace FractalTicTacToe.Core
                     // TAKEBACK_RESOLVED|<roomId>|<ACCEPTED|DECLINED>|<fen>|<movesTranscript>
                     if (parts.Length >= 4)
                     {
+                        ClientOnlineRoomSession tbResSession = GetOrCreateRoomSession(parts[1]);
                         bool accepted = string.Equals(parts[2], "ACCEPTED", StringComparison.OrdinalIgnoreCase);
-                        HasIncomingTakebackOffer = false;
-                        IsWaitingForOpponentTakebackResponse = false;
+                        tbResSession.HasIncomingTakebackOffer = false;
+                        tbResSession.IsWaitingForOpponentTakebackResponse = false;
 
                         if (accepted)
                         {
                             if (parts.Length >= 5 && !string.IsNullOrWhiteSpace(parts[4]))
                             {
-                                State = GameSerializer.ImportMoveHistory(parts[4]);
+                                tbResSession.State = GameSerializer.ImportMoveHistory(parts[4]);
                             }
                             else
                             {
-                                State = GameSerializer.FromFen(parts[3]);
+                                tbResSession.State = GameSerializer.FromFen(parts[3]);
                             }
-                            LastNetworkMove = State.GetLastMove();
+                            tbResSession.LastNetworkMove = tbResSession.State.GetLastMove();
                         }
 
                         TakebackResolved?.Invoke(accepted);
@@ -1027,8 +1234,9 @@ namespace FractalTicTacToe.Core
                     // MATCH_END|<roomId>|<winner>|<reason>|<newEloX>|<deltaX>|<newEloO>|<deltaO>|<fen>|<movesTranscript>
                     if (parts.Length >= 9)
                     {
-                        HasIncomingTakebackOffer = false;
-                        IsWaitingForOpponentTakebackResponse = false;
+                        ClientOnlineRoomSession endSession = GetOrCreateRoomSession(parts[1]);
+                        endSession.HasIncomingTakebackOffer = false;
+                        endSession.IsWaitingForOpponentTakebackResponse = false;
 
                         Enum.TryParse(parts[2], ignoreCase: true, out Player winner);
                         Enum.TryParse(parts[3], ignoreCase: true, out MatchEndReason reason);
@@ -1040,42 +1248,42 @@ namespace FractalTicTacToe.Core
                         string transcript = parts.Length >= 10 ? parts[9] : string.Empty;
                         if (!string.IsNullOrWhiteSpace(transcript))
                         {
-                            State = GameSerializer.ImportMoveHistory(transcript);
+                            endSession.State = GameSerializer.ImportMoveHistory(transcript);
                         }
                         else
                         {
-                            State = GameSerializer.FromFen(parts[8]);
+                            endSession.State = GameSerializer.FromFen(parts[8]);
                         }
 
                         // Garantizar que State quede marcado como terminado con el ganador efectivo (p. ej. en Timeout / Rendición)
-                        State.ForceConclude(winner);
+                        endSession.State.ForceConclude(winner);
 
-                        string userX = AssignedRole == Player.X ? LocalUsername : OpponentUsername;
-                        string userO = AssignedRole == Player.O ? LocalUsername : OpponentUsername;
+                        string userX = endSession.AssignedRole == Player.X ? LocalUsername : endSession.OpponentUsername;
+                        string userO = endSession.AssignedRole == Player.O ? LocalUsername : endSession.OpponentUsername;
 
-                        if (AssignedRole == Player.X)
+                        if (endSession.AssignedRole == Player.X)
                         {
                             LocalElo = newEloX;
-                            OpponentElo = newEloO;
+                            endSession.OpponentElo = newEloO;
                         }
-                        else if (AssignedRole == Player.O)
+                        else if (endSession.AssignedRole == Player.O)
                         {
                             LocalElo = newEloO;
-                            OpponentElo = newEloX;
+                            endSession.OpponentElo = newEloX;
                         }
 
                         if (reason != MatchEndReason.Aborted)
                         {
                             if (winner == Player.None) LocalDraws++;
-                            else if (winner == AssignedRole) LocalWins++;
+                            else if (winner == endSession.AssignedRole) LocalWins++;
                             else LocalLosses++;
                         }
 
                         LocalRankTitle = EloRatingCalculator.GetRankTitle(LocalElo);
                         var eloUpdate = new EloMatchUpdate(newEloX, deltaX, newEloO, deltaO);
-                        LastRatingUpdate = eloUpdate;
-                        LastEndReason = reason;
-                        Clock.Pause();
+                        endSession.LastRatingUpdate = eloUpdate;
+                        endSession.LastEndReason = reason;
+                        endSession.Clock.Pause();
 
                         LastCompletedMatchRecord = new MatchRecord
                         {
@@ -1089,7 +1297,7 @@ namespace FractalTicTacToe.Core
                             PlayerOEloAfter = newEloO,
                             Winner = winner,
                             EndReason = reason,
-                            FinalFen = GameSerializer.ToFen(State),
+                            FinalFen = GameSerializer.ToFen(endSession.State),
                             MoveTranscript = transcript
                         };
 
@@ -1102,16 +1310,17 @@ namespace FractalTicTacToe.Core
                     // REMATCH_OFFERED|<roomId>|<requesterRole>
                     if (parts.Length >= 3)
                     {
+                        ClientOnlineRoomSession remSession = GetOrCreateRoomSession(parts[1]);
                         Enum.TryParse(parts[2], ignoreCase: true, out Player remRole);
-                        if (remRole != AssignedRole)
+                        if (remRole != remSession.AssignedRole)
                         {
-                            HasOpponentOfferedRematch = true;
-                            RematchDeclinedByOpponent = false;
+                            remSession.HasOpponentOfferedRematch = true;
+                            remSession.RematchDeclinedByOpponent = false;
                         }
                         else
                         {
-                            HasRequestedRematch = true;
-                            RematchDeclinedByOpponent = false;
+                            remSession.HasRequestedRematch = true;
+                            remSession.RematchDeclinedByOpponent = false;
                         }
                         StateChanged?.Invoke();
                     }
@@ -1119,10 +1328,13 @@ namespace FractalTicTacToe.Core
 
                 case MultiplayerProtocol.EvtRematchDeclined:
                     // REMATCH_DECLINED|<roomId>|<declinerRole>
-                    HasRequestedRematch = false;
-                    HasOpponentOfferedRematch = false;
-                    RematchDeclinedByOpponent = true;
-                    StateChanged?.Invoke();
+                    {
+                        ClientOnlineRoomSession decSession = parts.Length >= 2 ? GetOrCreateRoomSession(parts[1]) : _focusedRoom;
+                        decSession.HasRequestedRematch = false;
+                        decSession.HasOpponentOfferedRematch = false;
+                        decSession.RematchDeclinedByOpponent = true;
+                        StateChanged?.Invoke();
+                    }
                     break;
 
                 case MultiplayerProtocol.EvtAccountDeleted:

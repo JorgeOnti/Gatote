@@ -47,7 +47,8 @@ namespace FractalTicTacToe.Maui
         private int _timeControlIndex = 2; // Blitz 3+2 por defecto
 
         private string _serverHost;
-        private readonly GameSessionController _localSession;
+        private GameSessionController _localSession;
+        private readonly List<GameSessionController> _activeLocalSessions = new List<GameSessionController>();
         private readonly OnlineMultiplayerClient _onlineClient;
         private readonly MatchmakingService _localAuthStore = new MatchmakingService();
         private IDispatcherTimer _frameTimer;
@@ -173,8 +174,7 @@ namespace FractalTicTacToe.Maui
 
         private Grid _postGameActionsRow;
         private Button _rematchButton;
-        private Button _analyzeFinishedMatchButton;
-        private Button _backToMenuButton;
+        private Button _newMatchButton;
 
         // Pantalla 3: Sala de Análisis
         private readonly Border[] _analysisMacroBorders = new Border[GameState.BoardCount];
@@ -1206,6 +1206,32 @@ namespace FractalTicTacToe.Maui
             NavigateToScreen(ScreenState.PlayArena);
         }
 
+        private GameSessionController PrepareNewLocalSession(SessionMode mode, BotDifficulty difficulty, TimeControlConfig timeControl, string defaultUser)
+        {
+            if (_hasUnfinishedLocalMatch && !_localSession.State.IsGameOver)
+            {
+                if (!_activeLocalSessions.Contains(_localSession))
+                {
+                    _activeLocalSessions.Add(_localSession);
+                }
+
+                var nextSession = new GameSessionController(mode, difficulty, timeControl: timeControl);
+                nextSession.StateChanged += OnAnySessionStateChanged;
+                _localSession = nextSession;
+            }
+
+            _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : defaultUser;
+            _localSession.SetTimeControl(timeControl);
+            _localSession.ConfigureSession(mode, difficulty, _localSession.ProfileX);
+
+            if (!_activeLocalSessions.Contains(_localSession))
+            {
+                _activeLocalSessions.Add(_localSession);
+            }
+
+            return _localSession;
+        }
+
         private void StartBotMatchWithoutClock(BotDifficulty difficulty)
         {
             TriggerSubtleHaptic();
@@ -1213,12 +1239,10 @@ namespace FractalTicTacToe.Maui
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
-            _hasUnfinishedLocalMatch = true;
             _currentHintMove = null;
 
-            _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
-            _localSession.SetTimeControl(TimeControlConfig.Unlimited);
-            _localSession.ConfigureSession(SessionMode.HumanVsBotX, difficulty, _localSession.ProfileX);
+            PrepareNewLocalSession(SessionMode.HumanVsBotX, difficulty, TimeControlConfig.Unlimited, "Jugador");
+            _hasUnfinishedLocalMatch = true;
 
             NavigateToScreen(ScreenState.PlayArena);
         }
@@ -1235,10 +1259,8 @@ namespace FractalTicTacToe.Maui
             if (_selectedOpponentType == LobbyOpponentType.LocalPassAndPlay)
             {
                 _isOnlineMode = false;
+                PrepareNewLocalSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, selectedTime, "Jugador 1");
                 _hasUnfinishedLocalMatch = true;
-                _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador 1";
-                _localSession.SetTimeControl(selectedTime);
-                _localSession.ConfigureSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, _localSession.ProfileX);
                 NavigateToScreen(ScreenState.PlayArena);
                 return;
             }
@@ -1531,20 +1553,17 @@ namespace FractalTicTacToe.Maui
                 ColumnDefinitions =
                 {
                     new ColumnDefinition { Width = GridLength.Star },
-                    new ColumnDefinition { Width = GridLength.Star },
                     new ColumnDefinition { Width = GridLength.Star }
                 },
-                ColumnSpacing = 6,
+                ColumnSpacing = 8,
                 IsVisible = false
             };
 
             _rematchButton = CreateActionButton("Revancha", OnRematchPressed, height: 44, fontSize: 13);
-            _analyzeFinishedMatchButton = CreateActionButton("Analizar", OnOpenCurrentMatchInAnalysisPressed, height: 44, fontSize: 13);
-            _backToMenuButton = CreateActionButton("Inicio", () => NavigateToScreen(ScreenState.HomeLobby), height: 44, fontSize: 13);
+            _newMatchButton = CreateActionButton("Nueva Partida", OnNewMatchAfterGameOverPressed, height: 44, fontSize: 13);
 
             _postGameActionsRow.Add(_rematchButton, 0, 0);
-            _postGameActionsRow.Add(_analyzeFinishedMatchButton, 1, 0);
-            _postGameActionsRow.Add(_backToMenuButton, 2, 0);
+            _postGameActionsRow.Add(_newMatchButton, 1, 0);
 
             actionsHost.Add(_inGameActionsRow);
             actionsHost.Add(_postGameActionsRow);
@@ -2086,12 +2105,37 @@ namespace FractalTicTacToe.Maui
             }
 
             _localSession.StartNewMatch();
+            if (!_activeLocalSessions.Contains(_localSession))
+            {
+                _activeLocalSessions.Add(_localSession);
+            }
             _hasUnfinishedLocalMatch = true;
             RefreshUI();
         }
 
-        private void ResumeActiveOnlineMatch()
+        private void OnNewMatchAfterGameOverPressed()
         {
+            TriggerSubtleHaptic();
+            ExitTutorialMode();
+            _currentHintMove = null;
+
+            if (_isOnlineMode)
+            {
+                _selectedOpponentType = LobbyOpponentType.OnlineMultiplayer;
+                NavigateToScreen(ScreenState.HomeLobby);
+                OnTimeControlCardSelected(_timeControlIndex);
+                return;
+            }
+
+            NavigateToScreen(ScreenState.HomeLobby);
+        }
+
+        private void ResumeActiveOnlineMatch(string roomId)
+        {
+            if (!string.IsNullOrEmpty(roomId))
+            {
+                _onlineClient.SwitchActiveRoom(roomId);
+            }
             if (!_onlineClient.IsInActiveMatch) return;
             TriggerSubtleHaptic();
             ExitTutorialMode();
@@ -2100,21 +2144,38 @@ namespace FractalTicTacToe.Maui
             NavigateToScreen(ScreenState.PlayArena);
         }
 
-        private void ResumeActiveLocalMatch()
+        private void ResumeActiveLocalMatch(GameSessionController session)
         {
-            if (_localSession.State.IsGameOver) return;
+            if (session == null || session.State.IsGameOver) return;
             TriggerSubtleHaptic();
             ExitTutorialMode();
+            _localSession = session;
+            _hasUnfinishedLocalMatch = true;
             _isOnlineMode = false;
             _currentHintMove = null;
             NavigateToScreen(ScreenState.PlayArena);
         }
 
-        private void DiscardActiveLocalMatch()
+        private void DiscardActiveLocalMatch(GameSessionController session)
         {
             TriggerSubtleHaptic();
-            _hasUnfinishedLocalMatch = false;
-            _localSession.StartNewMatch();
+            if (session != null)
+            {
+                _activeLocalSessions.Remove(session);
+            }
+            if (ReferenceEquals(session, _localSession))
+            {
+                if (_activeLocalSessions.Count > 0)
+                {
+                    _localSession = _activeLocalSessions[_activeLocalSessions.Count - 1];
+                    _hasUnfinishedLocalMatch = !_localSession.State.IsGameOver;
+                }
+                else
+                {
+                    _hasUnfinishedLocalMatch = false;
+                    _localSession.StartNewMatch();
+                }
+            }
             RefreshUI();
         }
 
@@ -2125,17 +2186,25 @@ namespace FractalTicTacToe.Maui
                 return;
             }
 
-            if (_localSession.State.IsGameOver)
+            // Limpiar sesiones locales que ya hayan concluido
+            for (int i = _activeLocalSessions.Count - 1; i >= 0; i--)
             {
-                _hasUnfinishedLocalMatch = false;
+                if (_activeLocalSessions[i].State.IsGameOver)
+                {
+                    _activeLocalSessions.RemoveAt(i);
+                }
             }
 
-            bool hasOnlineActive = _onlineClient.IsInActiveMatch;
-            bool hasLocalActive = _hasUnfinishedLocalMatch && !_localSession.State.IsGameOver;
+            if (_localSession.State.IsGameOver)
+            {
+                _hasUnfinishedLocalMatch = _activeLocalSessions.Count > 0;
+            }
+
+            List<ClientOnlineRoomSession> onlineRooms = _onlineClient.GetActiveRooms();
 
             _activeMatchesStack.Children.Clear();
 
-            if (!hasOnlineActive && !hasLocalActive)
+            if (onlineRooms.Count == 0 && _activeLocalSessions.Count == 0)
             {
                 _activeMatchesCard.IsVisible = false;
                 return;
@@ -2143,13 +2212,14 @@ namespace FractalTicTacToe.Maui
 
             _activeMatchesCard.IsVisible = true;
 
-            if (hasOnlineActive)
+            foreach (ClientOnlineRoomSession room in onlineRooms)
             {
-                string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Rival";
-                Player myRole = _onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X;
-                bool isMyTurn = _onlineClient.State.CurrentPlayer == myRole;
+                string targetRoomId = room.RoomId;
+                string oppName = !string.IsNullOrEmpty(room.OpponentUsername) ? room.OpponentUsername : "Rival";
+                Player myRole = room.AssignedRole != Player.None ? room.AssignedRole : Player.X;
+                bool isMyTurn = room.State.CurrentPlayer == myRole;
                 string turnText = isMyTurn ? "Tu turno" : $"Turno de {oppName}";
-                string summary = $"En línea vs {oppName} ({_onlineClient.Clock.Config.Name})\nJugada {_onlineClient.State.MoveCount} • {turnText}";
+                string summary = $"En línea vs {oppName} ({room.Clock.Config.Name})\nJugada {room.State.MoveCount} • {turnText}";
 
                 var row = new Grid
                 {
@@ -2168,7 +2238,7 @@ namespace FractalTicTacToe.Maui
                     TextColor = Colors.White,
                     VerticalOptions = LayoutOptions.Center
                 };
-                var resumeBtn = CreateActionButton("Regresar", ResumeActiveOnlineMatch, height: 36, fontSize: 12);
+                var resumeBtn = CreateActionButton("Regresar", () => ResumeActiveOnlineMatch(targetRoomId), height: 36, fontSize: 12);
                 resumeBtn.BackgroundColor = Color.FromRgb(30, 92, 68);
 
                 row.Add(lbl, 0, 0);
@@ -2176,13 +2246,14 @@ namespace FractalTicTacToe.Maui
                 _activeMatchesStack.Add(row);
             }
 
-            if (hasLocalActive)
+            foreach (GameSessionController localSess in _activeLocalSessions)
             {
-                bool isVsAi = _localSession.Mode == SessionMode.HumanVsBotX || _localSession.Mode == SessionMode.BotVsHumanO;
+                GameSessionController targetSession = localSess;
+                bool isVsAi = targetSession.Mode == SessionMode.HumanVsBotX || targetSession.Mode == SessionMode.BotVsHumanO;
                 string modeDesc = isVsAi
-                    ? $"Contra IA ({FormatDifficultyLabel(_localSession.BotDifficulty)})"
-                    : $"2 Jugadores ({_localSession.Clock.Config.Name})";
-                string summary = $"{modeDesc}\nJugada {_localSession.State.MoveCount} • Turno de [{_localSession.State.CurrentPlayer}]";
+                    ? $"Contra IA ({FormatDifficultyLabel(targetSession.BotDifficulty)})"
+                    : $"2 Jugadores ({targetSession.Clock.Config.Name})";
+                string summary = $"{modeDesc}\nJugada {targetSession.State.MoveCount} • Turno de [{targetSession.State.CurrentPlayer}]";
 
                 var row = new Grid
                 {
@@ -2202,9 +2273,9 @@ namespace FractalTicTacToe.Maui
                     TextColor = Colors.White,
                     VerticalOptions = LayoutOptions.Center
                 };
-                var resumeBtn = CreateActionButton("Regresar", ResumeActiveLocalMatch, height: 36, fontSize: 12);
+                var resumeBtn = CreateActionButton("Regresar", () => ResumeActiveLocalMatch(targetSession), height: 36, fontSize: 12);
                 resumeBtn.BackgroundColor = Color.FromRgb(30, 92, 68);
-                var closeBtn = CreateActionButton("Cerrar", DiscardActiveLocalMatch, height: 36, fontSize: 11);
+                var closeBtn = CreateActionButton("Cerrar", () => DiscardActiveLocalMatch(targetSession), height: 36, fontSize: 11);
                 closeBtn.BackgroundColor = Color.FromRgb(68, 28, 36);
 
                 row.Add(lbl, 0, 0);
@@ -2512,8 +2583,9 @@ namespace FractalTicTacToe.Maui
                     _rematchButton.IsEnabled = true;
                 }
 
-                _analyzeFinishedMatchButton.IsVisible = state.MoveCount > 0;
-                _analyzeFinishedMatchButton.IsEnabled = state.MoveCount > 0;
+                _newMatchButton.Text = "Nueva Partida";
+                _newMatchButton.IsVisible = true;
+                _newMatchButton.IsEnabled = true;
             }
         }
 
@@ -2561,7 +2633,9 @@ namespace FractalTicTacToe.Maui
                 {
                     _rematchButton.Text = "Repetir tutorial";
                     _rematchButton.IsEnabled = true;
-                    _analyzeFinishedMatchButton.IsVisible = false;
+                    _newMatchButton.Text = "Nueva Partida";
+                    _newMatchButton.IsVisible = true;
+                    _newMatchButton.IsEnabled = true;
                 }
                 return;
             }
@@ -2646,8 +2720,9 @@ namespace FractalTicTacToe.Maui
             {
                 _rematchButton.Text = "Revancha";
                 _rematchButton.IsEnabled = true;
-                _analyzeFinishedMatchButton.IsVisible = state.MoveCount > 0;
-                _analyzeFinishedMatchButton.IsEnabled = state.MoveCount > 0;
+                _newMatchButton.Text = "Nueva Partida";
+                _newMatchButton.IsVisible = true;
+                _newMatchButton.IsEnabled = true;
             }
         }
 

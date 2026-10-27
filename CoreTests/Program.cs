@@ -934,6 +934,26 @@ namespace CoreTests
                     "TryFindActiveRoomForPlayer debe encontrar la sala activa de PlayerMovilX.");
                 Assert(foundRoomX.RoomId == room.RoomId && foundRoleX == Player.X,
                     "La sala activa encontrada debe coincidir con RoomId y el rol X.");
+
+                // Verificar que si el jugador va a Inicio a media partida e inicia una SEGUNDA partida, AMBAS aparezcan en Partidas Activas
+                mm.RegisterAccount("PlayerMovilRival2", "pass123", out PlayerProfile pRival2, out _);
+                string code2 = mm.CreatePrivateLobby(px.PlayerId, TimeControlConfig.Rapid5Plus0);
+                OnlineMatchRoom room2 = mm.JoinPrivateLobby(pRival2.PlayerId, code2, out _);
+
+                Assert(mm.GetActiveRoomsForPlayer(px.PlayerId).Count == 2,
+                    "El servidor debe conservar ambas partidas activas del jugador simultáneamente.");
+
+                client.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(room2, room2.GetPlayerRole(px.PlayerId)));
+                Assert(client.GetActiveRooms().Count == 2,
+                    "El cliente debe mantener ambas salas activas en GetActiveRooms() para listarlas en Inicio.");
+
+                // Cambiar entre la partida 1 y la partida 2 sin perder el progreso de ninguna
+                Assert(client.SwitchActiveRoom(room.RoomId), "SwitchActiveRoom debe cambiar a la primera partida.");
+                Assert(client.ActiveRoomId == room.RoomId && client.State.MoveCount == 2,
+                    "Al regresar a la primera partida, debe conservar sus 2 movimientos.");
+                Assert(client.SwitchActiveRoom(room2.RoomId), "SwitchActiveRoom debe cambiar a la segunda partida.");
+                Assert(client.ActiveRoomId == room2.RoomId && client.State.MoveCount == 0,
+                    "Al regresar a la segunda partida, debe estar en su estado independiente (0 movimientos).");
             }
         }
 

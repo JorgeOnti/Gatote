@@ -42,6 +42,7 @@ namespace FractalTicTacToe.GodotClient
         private int _timeControlIndex = 2; // Blitz 3+2 por defecto
 
         private GameSessionController _localSession;
+        private readonly List<GameSessionController> _activeLocalSessions = new List<GameSessionController>();
         private OnlineMultiplayerClient _onlineClient;
         private readonly MatchmakingService _localAuthStore = new MatchmakingService();
         private bool _isOnlineMode;
@@ -163,8 +164,7 @@ namespace FractalTicTacToe.GodotClient
 
         private HBoxContainer _postGameActionsRow;
         private Button _rematchButton;
-        private Button _analyzeFinishedMatchButton;
-        private Button _backToMenuButton;
+        private Button _newMatchButton;
 
         // =====================================================================
         // Referencias de UI: Pantalla 3 (🎬 SALA DE ANÁLISIS)
@@ -1395,20 +1395,43 @@ namespace FractalTicTacToe.GodotClient
             NavigateToScreen(ScreenState.PlayArena);
         }
 
+        private GameSessionController PrepareNewLocalSession(SessionMode mode, BotDifficulty difficulty, TimeControlConfig timeControl, string defaultUser)
+        {
+            if (_hasUnfinishedLocalMatch && !_localSession.State.IsGameOver)
+            {
+                if (!_activeLocalSessions.Contains(_localSession))
+                {
+                    _activeLocalSessions.Add(_localSession);
+                }
+
+                var nextSession = new GameSessionController(mode, difficulty, timeControl: timeControl);
+                nextSession.StateChanged += OnAnySessionStateChanged;
+                _localSession = nextSession;
+            }
+
+            _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : defaultUser;
+            _localSession.SetTimeControl(timeControl);
+            _localSession.ConfigureSession(mode, difficulty, _localSession.ProfileX);
+
+            if (!_activeLocalSessions.Contains(_localSession))
+            {
+                _activeLocalSessions.Add(_localSession);
+            }
+
+            return _localSession;
+        }
+
         private void StartBotMatchWithoutClock(BotDifficulty difficulty)
         {
             ExitTutorialMode();
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
-            _hasUnfinishedLocalMatch = true;
             _currentHintMove = null;
             _lastAnimatedMove = null;
             _victoryLineAnimated = false;
 
-            _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
-            // REQUERIMIENTO 1: Contra IA no tiene límite de tiempo
-            _localSession.SetTimeControl(TimeControlConfig.Unlimited);
-            _localSession.ConfigureSession(SessionMode.HumanVsBotX, difficulty, _localSession.ProfileX);
+            PrepareNewLocalSession(SessionMode.HumanVsBotX, difficulty, TimeControlConfig.Unlimited, "Jugador");
+            _hasUnfinishedLocalMatch = true;
 
             NavigateToScreen(ScreenState.PlayArena);
         }
@@ -1426,10 +1449,8 @@ namespace FractalTicTacToe.GodotClient
             if (_selectedOpponentType == LobbyOpponentType.LocalPassAndPlay)
             {
                 _isOnlineMode = false;
+                PrepareNewLocalSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, selectedTime, "Jugador 1");
                 _hasUnfinishedLocalMatch = true;
-                _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador 1";
-                _localSession.SetTimeControl(selectedTime);
-                _localSession.ConfigureSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, _localSession.ProfileX);
                 NavigateToScreen(ScreenState.PlayArena);
                 return;
             }
@@ -1700,7 +1721,7 @@ namespace FractalTicTacToe.GodotClient
             _inGameActionsRow.AddChild(_hintButton);
             _inGameActionsRow.AddChild(_resignOrLeaveButton);
 
-            // 6B. Controles AL TERMINAR la partida (REQUERIMIENTO 2, 9 y 10: Revancha, Analizar y Volver al Menú)
+            // 6B. Controles AL TERMINAR la partida: solo Revancha y Nueva Partida (arriba de Inicio/Análisis/Perfil)
             _postGameActionsRow = new HBoxContainer
             {
                 SizeFlagsHorizontal = SizeFlags.ExpandFill,
@@ -1710,12 +1731,10 @@ namespace FractalTicTacToe.GodotClient
             mainColumn.AddChild(_postGameActionsRow);
 
             _rematchButton = CreateActionButton("Revancha", OnRematchPressed, minHeight: 68);
-            _analyzeFinishedMatchButton = CreateActionButton("Analizar", OnOpenCurrentMatchInAnalysisPressed, minHeight: 68);
-            _backToMenuButton = CreateActionButton("Inicio", () => NavigateToScreen(ScreenState.HomeLobby), minHeight: 68);
+            _newMatchButton = CreateActionButton("Nueva Partida", OnNewMatchAfterGameOverPressed, minHeight: 68);
 
             _postGameActionsRow.AddChild(_rematchButton);
-            _postGameActionsRow.AddChild(_analyzeFinishedMatchButton);
-            _postGameActionsRow.AddChild(_backToMenuButton);
+            _postGameActionsRow.AddChild(_newMatchButton);
 
             return mainColumn;
         }
@@ -2461,12 +2480,38 @@ namespace FractalTicTacToe.GodotClient
             }
 
             _localSession.StartNewMatch();
+            if (!_activeLocalSessions.Contains(_localSession))
+            {
+                _activeLocalSessions.Add(_localSession);
+            }
             _hasUnfinishedLocalMatch = true;
             RefreshUI();
         }
 
-        private void ResumeActiveOnlineMatch()
+        private void OnNewMatchAfterGameOverPressed()
         {
+            ExitTutorialMode();
+            _currentHintMove = null;
+            _lastAnimatedMove = null;
+            _victoryLineAnimated = false;
+
+            if (_isOnlineMode)
+            {
+                _selectedOpponentType = LobbyOpponentType.OnlineMultiplayer;
+                NavigateToScreen(ScreenState.HomeLobby);
+                OnTimeControlCardSelected(_timeControlIndex);
+                return;
+            }
+
+            NavigateToScreen(ScreenState.HomeLobby);
+        }
+
+        private void ResumeActiveOnlineMatch(string roomId)
+        {
+            if (!string.IsNullOrEmpty(roomId))
+            {
+                _onlineClient.SwitchActiveRoom(roomId);
+            }
             if (!_onlineClient.IsInActiveMatch) return;
             ExitTutorialMode();
             _isOnlineMode = true;
@@ -2474,19 +2519,36 @@ namespace FractalTicTacToe.GodotClient
             NavigateToScreen(ScreenState.PlayArena);
         }
 
-        private void ResumeActiveLocalMatch()
+        private void ResumeActiveLocalMatch(GameSessionController session)
         {
-            if (_localSession.State.IsGameOver) return;
+            if (session == null || session.State.IsGameOver) return;
             ExitTutorialMode();
+            _localSession = session;
+            _hasUnfinishedLocalMatch = true;
             _isOnlineMode = false;
             _currentHintMove = null;
             NavigateToScreen(ScreenState.PlayArena);
         }
 
-        private void DiscardActiveLocalMatch()
+        private void DiscardActiveLocalMatch(GameSessionController session)
         {
-            _hasUnfinishedLocalMatch = false;
-            _localSession.StartNewMatch();
+            if (session != null)
+            {
+                _activeLocalSessions.Remove(session);
+            }
+            if (ReferenceEquals(session, _localSession))
+            {
+                if (_activeLocalSessions.Count > 0)
+                {
+                    _localSession = _activeLocalSessions[_activeLocalSessions.Count - 1];
+                    _hasUnfinishedLocalMatch = !_localSession.State.IsGameOver;
+                }
+                else
+                {
+                    _hasUnfinishedLocalMatch = false;
+                    _localSession.StartNewMatch();
+                }
+            }
             RefreshUI();
         }
 
@@ -2497,20 +2559,27 @@ namespace FractalTicTacToe.GodotClient
                 return;
             }
 
-            if (_localSession.State.IsGameOver)
+            for (int i = _activeLocalSessions.Count - 1; i >= 0; i--)
             {
-                _hasUnfinishedLocalMatch = false;
+                if (_activeLocalSessions[i].State.IsGameOver)
+                {
+                    _activeLocalSessions.RemoveAt(i);
+                }
             }
 
-            bool hasOnlineActive = _onlineClient.IsInActiveMatch;
-            bool hasLocalActive = _hasUnfinishedLocalMatch && !_localSession.State.IsGameOver;
+            if (_localSession.State.IsGameOver)
+            {
+                _hasUnfinishedLocalMatch = _activeLocalSessions.Count > 0;
+            }
+
+            List<ClientOnlineRoomSession> onlineRooms = _onlineClient.GetActiveRooms();
 
             foreach (Node child in _activeMatchesListContainer.GetChildren())
             {
                 child.QueueFree();
             }
 
-            if (!hasOnlineActive && !hasLocalActive)
+            if (onlineRooms.Count == 0 && _activeLocalSessions.Count == 0)
             {
                 _activeMatchesPanel.Visible = false;
                 return;
@@ -2518,23 +2587,24 @@ namespace FractalTicTacToe.GodotClient
 
             _activeMatchesPanel.Visible = true;
 
-            if (hasOnlineActive)
+            foreach (ClientOnlineRoomSession room in onlineRooms)
             {
-                string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Rival";
-                Player myRole = _onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X;
-                bool isMyTurn = _onlineClient.State.CurrentPlayer == myRole;
+                string targetRoomId = room.RoomId;
+                string oppName = !string.IsNullOrEmpty(room.OpponentUsername) ? room.OpponentUsername : "Rival";
+                Player myRole = room.AssignedRole != Player.None ? room.AssignedRole : Player.X;
+                bool isMyTurn = room.State.CurrentPlayer == myRole;
                 string turnText = isMyTurn ? "Tu turno" : $"Turno de {oppName}";
 
                 var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
                 row.AddThemeConstantOverride("separation", 10);
                 var lbl = new Label
                 {
-                    Text = $"En línea vs {oppName} ({_onlineClient.Clock.Config.Name}) • Jugada {_onlineClient.State.MoveCount} ({turnText})",
+                    Text = $"En línea vs {oppName} ({room.Clock.Config.Name}) • Jugada {room.State.MoveCount} ({turnText})",
                     SizeFlagsHorizontal = SizeFlags.ExpandFill,
                     AutowrapMode = TextServer.AutowrapMode.WordSmart
                 };
                 lbl.AddThemeFontSizeOverride("font_size", 17);
-                var resumeBtn = CreateActionButton("Regresar", ResumeActiveOnlineMatch, minHeight: 44);
+                var resumeBtn = CreateActionButton("Regresar", () => ResumeActiveOnlineMatch(targetRoomId), minHeight: 44);
                 resumeBtn.CustomMinimumSize = new Vector2(120, 44);
                 resumeBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
 
@@ -2543,26 +2613,27 @@ namespace FractalTicTacToe.GodotClient
                 _activeMatchesListContainer.AddChild(row);
             }
 
-            if (hasLocalActive)
+            foreach (GameSessionController localSess in _activeLocalSessions)
             {
-                bool isVsAi = _localSession.Mode == SessionMode.HumanVsBotX || _localSession.Mode == SessionMode.BotVsHumanO;
+                GameSessionController targetSession = localSess;
+                bool isVsAi = targetSession.Mode == SessionMode.HumanVsBotX || targetSession.Mode == SessionMode.BotVsHumanO;
                 string modeDesc = isVsAi
-                    ? $"Contra IA ({_localSession.BotDifficulty})"
-                    : $"2 Jugadores ({_localSession.Clock.Config.Name})";
+                    ? $"Contra IA ({targetSession.BotDifficulty})"
+                    : $"2 Jugadores ({targetSession.Clock.Config.Name})";
 
                 var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
                 row.AddThemeConstantOverride("separation", 8);
                 var lbl = new Label
                 {
-                    Text = $"{modeDesc} • Jugada {_localSession.State.MoveCount} (Turno de {_localSession.State.CurrentPlayer})",
+                    Text = $"{modeDesc} • Jugada {targetSession.State.MoveCount} (Turno de {targetSession.State.CurrentPlayer})",
                     SizeFlagsHorizontal = SizeFlags.ExpandFill,
                     AutowrapMode = TextServer.AutowrapMode.WordSmart
                 };
                 lbl.AddThemeFontSizeOverride("font_size", 17);
-                var resumeBtn = CreateActionButton("Regresar", ResumeActiveLocalMatch, minHeight: 44);
+                var resumeBtn = CreateActionButton("Regresar", () => ResumeActiveLocalMatch(targetSession), minHeight: 44);
                 resumeBtn.CustomMinimumSize = new Vector2(115, 44);
                 resumeBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
-                var closeBtn = CreateActionButton("Cerrar", DiscardActiveLocalMatch, minHeight: 44);
+                var closeBtn = CreateActionButton("Cerrar", () => DiscardActiveLocalMatch(targetSession), minHeight: 44);
                 closeBtn.CustomMinimumSize = new Vector2(95, 44);
                 closeBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
 
@@ -2770,12 +2841,13 @@ namespace FractalTicTacToe.GodotClient
                 }
                 else
                 {
-                    _rematchButton.Text = "🔄 Revancha";
+                    _rematchButton.Text = "Revancha";
                     _rematchButton.Disabled = false;
                 }
 
-                _analyzeFinishedMatchButton.Visible = state.MoveCount > 0;
-                _analyzeFinishedMatchButton.Disabled = state.MoveCount == 0;
+                _newMatchButton.Text = "Nueva Partida";
+                _newMatchButton.Visible = true;
+                _newMatchButton.Disabled = false;
             }
         }
 
@@ -2821,7 +2893,9 @@ namespace FractalTicTacToe.GodotClient
                 {
                     _rematchButton.Text = "Repetir tutorial";
                     _rematchButton.Disabled = false;
-                    _analyzeFinishedMatchButton.Visible = false;
+                    _newMatchButton.Text = "Nueva Partida";
+                    _newMatchButton.Visible = true;
+                    _newMatchButton.Disabled = false;
                 }
                 return;
             }
@@ -2917,8 +2991,9 @@ namespace FractalTicTacToe.GodotClient
             {
                 _rematchButton.Text = "Revancha";
                 _rematchButton.Disabled = false;
-                _analyzeFinishedMatchButton.Visible = state.MoveCount > 0;
-                _analyzeFinishedMatchButton.Disabled = state.MoveCount == 0;
+                _newMatchButton.Text = "Nueva Partida";
+                _newMatchButton.Visible = true;
+                _newMatchButton.Disabled = false;
             }
         }
 

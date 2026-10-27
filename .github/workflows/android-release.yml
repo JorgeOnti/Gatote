@@ -46,7 +46,6 @@ jobs:
         dotnet publish FractalTicTacToe.Maui/FractalTicTacToe.Maui.csproj \
           -f net8.0-android \
           -c Release \
-          -p:AndroidPackageFormats="aab;apk" \
           -p:AndroidKeyStore=true \
           -p:AndroidSigningKeyStore="gatote-release.keystore" \
           -p:AndroidSigningKeyAlias="gatote_key" \

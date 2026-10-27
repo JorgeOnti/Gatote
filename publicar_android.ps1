@@ -47,7 +47,6 @@ Write-Host "`nCompilando paquetes firmados (.aab para Google Play y .apk para in
 dotnet publish "$mauiDir\FractalTicTacToe.Maui.csproj" `
     -f net8.0-android `
     -c Release `
-    -p:AndroidPackageFormats="aab;apk" `
     -p:AndroidKeyStore=true `
     -p:AndroidSigningKeyStore="$keystorePath" `
     -p:AndroidSigningKeyAlias="gatote_key" `

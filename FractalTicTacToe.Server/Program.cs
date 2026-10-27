@@ -603,12 +603,17 @@ namespace FractalTicTacToe.Server
             sender.Send(MultiplayerProtocol.BuildAuthOk(profile));
             Console.WriteLine($"[{tag}] {profile}");
 
-            // Si el jugador tiene una partida en línea en curso, sincronizarla automáticamente para que pueda regresar a ella
-            if (Matchmaking.TryFindActiveRoomForPlayer(profile.PlayerId, out OnlineMatchRoom activeRoom, out Player role))
+            // Sincronizar todas las partidas en línea activas del jugador para que aparezcan en su recuadro de Partidas Activas
+            List<OnlineMatchRoom> activeRooms = Matchmaking.GetActiveRoomsForPlayer(profile.PlayerId);
+            foreach (OnlineMatchRoom activeRoom in activeRooms)
             {
-                sender.ActiveRoomId = activeRoom.RoomId;
-                sender.Send(MultiplayerProtocol.BuildSessionResumed(activeRoom, role));
-                Console.WriteLine($"[PARTIDA ACTIVA SINCRONIZADA] {profile.Username} mantiene activa la sala {activeRoom.RoomId} como [{role}].");
+                Player role = activeRoom.GetPlayerRole(profile.PlayerId);
+                if (role != Player.None)
+                {
+                    sender.ActiveRoomId = activeRoom.RoomId;
+                    sender.Send(MultiplayerProtocol.BuildSessionResumed(activeRoom, role));
+                    Console.WriteLine($"[PARTIDA ACTIVA SINCRONIZADA] {profile.Username} mantiene activa la sala {activeRoom.RoomId} como [{role}].");
+                }
             }
         }
 
