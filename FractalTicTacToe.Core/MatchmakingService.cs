@@ -443,6 +443,36 @@ namespace FractalTicTacToe.Core
         }
 
         /// <summary>
+        /// Busca si el jugador tiene actualmente una partida en línea en curso sin concluir.
+        /// Permite restaurar la partida en el recuadro de Partidas Activas (estilo Lichess).
+        /// </summary>
+        public bool TryFindActiveRoomForPlayer(string playerId, out OnlineMatchRoom activeRoom, out Player role)
+        {
+            activeRoom = null;
+            role = Player.None;
+            if (string.IsNullOrEmpty(playerId))
+            {
+                return false;
+            }
+
+            lock (_syncLock)
+            {
+                foreach (OnlineMatchRoom room in _activeRooms.Values)
+                {
+                    if (room.IsMatchOver) continue;
+                    Player r = room.GetPlayerRole(playerId);
+                    if (r != Player.None)
+                    {
+                        activeRoom = room;
+                        role = r;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Obtiene la tabla de clasificación (Leaderboard) ordenada de mayor a menor puntaje.
         /// </summary>
         public List<PlayerProfile> GetLeaderboard(int maxCount = 20)

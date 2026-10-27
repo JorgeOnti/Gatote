@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -102,20 +104,37 @@ namespace FractalTicTacToe.Server
             {
                 using (tcpClient)
                 using (var stream = tcpClient.GetStream())
-                using (var reader = new StreamReader(stream, Encoding.UTF8))
-                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true })
                 {
-                    connection.Writer = writer;
-
-                    while (!ct.IsCancellationRequested)
+                    string firstLine = await ReadLineUnbufferedAsync(stream, ct).ConfigureAwait(false);
+                    if (firstLine == null)
                     {
-                        string rawLine = await reader.ReadLineAsync().ConfigureAwait(false);
-                        if (rawLine == null)
-                        {
-                            break;
-                        }
+                        return;
+                    }
 
-                        ProcessCommand(connection, rawLine);
+                    // Soporte Dual: HTTP / WebSocket (para Fly.io / Render / Railway en puerto 80/443 sin IPv4 dedicada) y TCP Puro
+                    if (firstLine.StartsWith("GET ", StringComparison.OrdinalIgnoreCase) ||
+                        firstLine.StartsWith("HEAD ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await HandleHttpOrWebSocketClientAsync(connection, stream, ct).ConfigureAwait(false);
+                        return;
+                    }
+
+                    using (var reader = new StreamReader(stream, Encoding.UTF8))
+                    using (var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true })
+                    {
+                        connection.Writer = writer;
+                        ProcessCommand(connection, firstLine);
+
+                        while (!ct.IsCancellationRequested)
+                        {
+                            string rawLine = await reader.ReadLineAsync().ConfigureAwait(false);
+                            if (rawLine == null)
+                            {
+                                break;
+                            }
+
+                            ProcessCommand(connection, rawLine);
+                        }
                     }
                 }
             }
@@ -127,6 +146,125 @@ namespace FractalTicTacToe.Server
             {
                 HandleClientDisconnect(connection);
             }
+        }
+
+        private static async Task HandleHttpOrWebSocketClientAsync(
+            ClientConnection connection,
+            NetworkStream stream,
+            CancellationToken ct)
+        {
+            string wsKey = null;
+            while (!ct.IsCancellationRequested)
+            {
+                string headerLine = await ReadLineUnbufferedAsync(stream, ct).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(headerLine))
+                {
+                    break;
+                }
+
+                if (headerLine.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))
+                {
+                    wsKey = headerLine.Substring("Sec-WebSocket-Key:".Length).Trim();
+                }
+            }
+
+            if (string.IsNullOrEmpty(wsKey))
+            {
+                // Healthcheck HTTP 200 OK para Fly.io / Render / navegador
+                const string body = "Gatote Fractal Server Online (TCP + WebSocket Ready)\n";
+                string httpResp =
+                    "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: text/plain; charset=utf-8\r\n" +
+                    $"Content-Length: {Encoding.UTF8.GetByteCount(body)}\r\n" +
+                    "Connection: close\r\n\r\n" +
+                    body;
+                byte[] respBytes = Encoding.UTF8.GetBytes(httpResp);
+                await stream.WriteAsync(respBytes, 0, respBytes.Length, ct).ConfigureAwait(false);
+                await stream.FlushAsync(ct).ConfigureAwait(false);
+                return;
+            }
+
+            // Completar Handshake WebSocket RFC 6455 (101 Switching Protocols)
+            string acceptKey = Convert.ToBase64String(
+                SHA1.HashData(Encoding.ASCII.GetBytes(wsKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
+
+            string handshake =
+                "HTTP/1.1 101 Switching Protocols\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                $"Sec-WebSocket-Accept: {acceptKey}\r\n\r\n";
+
+            byte[] hsBytes = Encoding.ASCII.GetBytes(handshake);
+            await stream.WriteAsync(hsBytes, 0, hsBytes.Length, ct).ConfigureAwait(false);
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+
+            using (WebSocket ws = WebSocket.CreateFromStream(
+                stream,
+                isServer: true,
+                subProtocol: null,
+                keepAliveInterval: TimeSpan.FromSeconds(25)))
+            {
+                connection.WebSocket = ws;
+                var buffer = new byte[4096];
+                var msgBuilder = new StringBuilder();
+
+                while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+                {
+                    WebSocketReceiveResult result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        break;
+                    }
+
+                    if (result.MessageType == WebSocketMessageType.Text)
+                    {
+                        msgBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                        if (result.EndOfMessage)
+                        {
+                            string payload = msgBuilder.ToString();
+                            msgBuilder.Clear();
+                            string[] lines = payload.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+                            foreach (string line in lines)
+                            {
+                                ProcessCommand(connection, line);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private static async Task<string> ReadLineUnbufferedAsync(Stream stream, CancellationToken ct)
+        {
+            var bytes = new List<byte>(128);
+            var singleByte = new byte[1];
+
+            while (!ct.IsCancellationRequested)
+            {
+                int read = await stream.ReadAsync(singleByte, 0, 1, ct).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return bytes.Count == 0 ? null : Encoding.UTF8.GetString(bytes.ToArray());
+                }
+
+                byte b = singleByte[0];
+                if (b == (byte)'\n')
+                {
+                    if (bytes.Count > 0 && bytes[bytes.Count - 1] == (byte)'\r')
+                    {
+                        bytes.RemoveAt(bytes.Count - 1);
+                    }
+                    return Encoding.UTF8.GetString(bytes.ToArray());
+                }
+
+                bytes.Add(b);
+                if (bytes.Count > 8192)
+                {
+                    break;
+                }
+            }
+
+            return Encoding.UTF8.GetString(bytes.ToArray());
         }
 
         private static void ProcessCommand(ClientConnection sender, string rawLine)
@@ -464,6 +602,14 @@ namespace FractalTicTacToe.Server
             Matchmaking.SaveToDirectory(DataDirectory);
             sender.Send(MultiplayerProtocol.BuildAuthOk(profile));
             Console.WriteLine($"[{tag}] {profile}");
+
+            // Si el jugador tiene una partida en línea en curso, sincronizarla automáticamente para que pueda regresar a ella
+            if (Matchmaking.TryFindActiveRoomForPlayer(profile.PlayerId, out OnlineMatchRoom activeRoom, out Player role))
+            {
+                sender.ActiveRoomId = activeRoom.RoomId;
+                sender.Send(MultiplayerProtocol.BuildSessionResumed(activeRoom, role));
+                Console.WriteLine($"[PARTIDA ACTIVA SINCRONIZADA] {profile.Username} mantiene activa la sala {activeRoom.RoomId} como [{role}].");
+            }
         }
 
         private static void BindRoomEventsAndNotifyStart(OnlineMatchRoom room)
@@ -630,6 +776,7 @@ namespace FractalTicTacToe.Server
             private readonly object _writeLock = new object();
             public TcpClient TcpClient { get; }
             public StreamWriter Writer { get; set; }
+            public WebSocket WebSocket { get; set; }
             public string PlayerId { get; set; }
             public string Username { get; set; }
             public string ActiveRoomId { get; set; }
@@ -645,7 +792,19 @@ namespace FractalTicTacToe.Server
                 {
                     try
                     {
-                        Writer?.WriteLine(packetLine);
+                        if (WebSocket != null && WebSocket.State == WebSocketState.Open)
+                        {
+                            byte[] bytes = Encoding.UTF8.GetBytes(packetLine + "\n");
+                            WebSocket.SendAsync(
+                                new ArraySegment<byte>(bytes),
+                                WebSocketMessageType.Text,
+                                endOfMessage: true,
+                                CancellationToken.None).GetAwaiter().GetResult();
+                        }
+                        else
+                        {
+                            Writer?.WriteLine(packetLine);
+                        }
                     }
                     catch
                     {

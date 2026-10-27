@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,10 +12,15 @@ namespace FractalTicTacToe.Core
     /// Cliente de red asíncrono para conectarse al servidor autoritativo <c>FractalTicTacToe.Server</c>.
     /// Gestiona autenticación (Login y Registro), cola de Matchmaking filtrada por control de tiempo,
     /// temporizador de 30s para el primer movimiento, relojes Fischer, Takeback mutuo y revanchas.
+    /// Soporta tanto WebSockets seguros (<c>wss://</c> en puerto 443) como sockets TCP directos.
     /// </summary>
     public sealed class OnlineMultiplayerClient : IDisposable
     {
+        public const string OfficialCloudServerHost = "gatote-fractal-server.fly.dev";
+        public const int DefaultConnectTimeoutMs = 3500;
+
         private TcpClient _tcpClient;
+        private ClientWebSocket _webSocket;
         private StreamReader _reader;
         private StreamWriter _writer;
         private CancellationTokenSource _receiveCts;
@@ -22,9 +28,9 @@ namespace FractalTicTacToe.Core
         private volatile bool _intentionalDisconnect;
         private volatile bool _handlingUnexpectedDisconnect;
 
-        public const int DefaultConnectTimeoutMs = 3000;
-
-        public bool IsConnected => _tcpClient != null && _tcpClient.Connected;
+        public bool IsConnected =>
+            (_webSocket != null && _webSocket.State == WebSocketState.Open) ||
+            (_tcpClient != null && _tcpClient.Connected);
         public bool IsAuthenticated => !string.IsNullOrEmpty(LocalPlayerId);
         public bool IsInQueue { get; private set; }
         public string PendingInviteCode { get; private set; }
@@ -133,12 +139,45 @@ namespace FractalTicTacToe.Core
             _intentionalDisconnect = false;
             _handlingUnexpectedDisconnect = false;
 
-            string[] candidateHosts = GetCandidateHosts(host);
+            string cleanHost = NormalizeHost(host);
+
+            // 1. Si el destino es el servidor en la nube (.fly.dev), intentar primero WebSocket Seguro (wss:// puerto 443)
+            // que despierta automáticamente la instancia de Fly.io y no requiere pagar IPv4 dedicada.
+            if (IsCloudHost(cleanHost))
+            {
+                ClientWebSocket ws = await TryConnectWebSocketAsync($"wss://{cleanHost}/", 4000).ConfigureAwait(false);
+                if (ws != null)
+                {
+                    _lastHost = cleanHost;
+                    _webSocket = ws;
+                    _receiveCts = new CancellationTokenSource();
+                    GameLogger.Info("NET", $"Conectado por WebSocket seguro a wss://{cleanHost}/.");
+                    _ = ReceiveLoopAsync(_receiveCts.Token);
+                    return;
+                }
+            }
+
+            // 2. Intentar conexión TCP directa a la lista de candidatos (nube + red local / Docker)
+            string[] candidateHosts = GetCandidateHosts(cleanHost);
             TcpClient connectedClient = null;
-            string winningHost = host;
+            string winningHost = cleanHost;
 
             foreach (string candidate in candidateHosts)
             {
+                if (IsCloudHost(candidate))
+                {
+                    ClientWebSocket wsFallback = await TryConnectWebSocketAsync($"wss://{candidate}/", 2500).ConfigureAwait(false);
+                    if (wsFallback != null)
+                    {
+                        _lastHost = candidate;
+                        _webSocket = wsFallback;
+                        _receiveCts = new CancellationTokenSource();
+                        GameLogger.Info("NET", $"Conectado por WebSocket seguro a wss://{candidate}/.");
+                        _ = ReceiveLoopAsync(_receiveCts.Token);
+                        return;
+                    }
+                }
+
                 var tcp = new TcpClient();
                 try
                 {
@@ -162,12 +201,12 @@ namespace FractalTicTacToe.Core
 
             if (connectedClient == null)
             {
-                GameLogger.Warn("NET", $"No se pudo conectar al servidor ({host}:{port}).");
+                GameLogger.Warn("NET", "No se pudo establecer conexión con el servidor en línea.");
                 throw new TimeoutException("No se pudo conectar al servidor.");
             }
 
             _lastHost = winningHost;
-            GameLogger.Info("NET", $"Conectado exitosamente al servidor {winningHost}:{port}.");
+            GameLogger.Info("NET", $"Conectado exitosamente al servidor TCP {winningHost}:{port}.");
             _tcpClient = connectedClient;
             NetworkStream stream = _tcpClient.GetStream();
             _reader = new StreamReader(stream, Encoding.UTF8);
@@ -177,22 +216,65 @@ namespace FractalTicTacToe.Core
             _ = ReceiveLoopAsync(_receiveCts.Token);
         }
 
-        private static string[] GetCandidateHosts(string primaryHost)
+        private static async Task<ClientWebSocket> TryConnectWebSocketAsync(string wsUri, int timeoutMs)
         {
-            string h = (primaryHost ?? "127.0.0.1").Trim();
-            if (h == "127.0.0.1" || h == "10.0.2.2" || h == "192.168.1.84" || h == "localhost")
+            var ws = new ClientWebSocket();
+            try
             {
-                var list = new System.Collections.Generic.List<string> { h };
-                foreach (string fallback in new[] { "127.0.0.1", "192.168.1.84", "10.0.2.2" })
+                using (var cts = new CancellationTokenSource(timeoutMs))
                 {
-                    if (!list.Contains(fallback))
+                    await ws.ConnectAsync(new Uri(wsUri), cts.Token).ConfigureAwait(false);
+                    if (ws.State == WebSocketState.Open)
                     {
-                        list.Add(fallback);
+                        return ws;
                     }
                 }
-                return list.ToArray();
             }
-            return new[] { h };
+            catch
+            {
+                // Ignorar y permitir fallback
+            }
+
+            try { ws.Dispose(); } catch { }
+            return null;
+        }
+
+        private static string NormalizeHost(string rawHost)
+        {
+            string h = (rawHost ?? OfficialCloudServerHost).Trim();
+            if (h.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                h = h.Substring("https://".Length);
+            else if (h.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                h = h.Substring("http://".Length);
+            else if (h.StartsWith("wss://", StringComparison.OrdinalIgnoreCase))
+                h = h.Substring("wss://".Length);
+            else if (h.StartsWith("ws://", StringComparison.OrdinalIgnoreCase))
+                h = h.Substring("ws://".Length);
+
+            int slashIdx = h.IndexOf('/');
+            if (slashIdx >= 0) h = h.Substring(0, slashIdx);
+            return string.IsNullOrWhiteSpace(h) ? OfficialCloudServerHost : h;
+        }
+
+        private static bool IsCloudHost(string host)
+        {
+            return !string.IsNullOrEmpty(host) &&
+                   (host.EndsWith(".fly.dev", StringComparison.OrdinalIgnoreCase) ||
+                    host.Contains("gatote-fractal-server", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string[] GetCandidateHosts(string primaryHost)
+        {
+            string h = NormalizeHost(primaryHost);
+            var list = new System.Collections.Generic.List<string> { h };
+            foreach (string fallback in new[] { OfficialCloudServerHost, "127.0.0.1", "192.168.1.84", "10.0.2.2" })
+            {
+                if (!list.Contains(fallback))
+                {
+                    list.Add(fallback);
+                }
+            }
+            return list.ToArray();
         }
 
         /// <summary>
@@ -447,6 +529,16 @@ namespace FractalTicTacToe.Core
 
             try
             {
+                _webSocket?.Abort();
+                _webSocket?.Dispose();
+            }
+            catch
+            {
+                // Ignorar
+            }
+
+            try
+            {
                 _tcpClient?.Close();
             }
             catch
@@ -454,6 +546,7 @@ namespace FractalTicTacToe.Core
                 // Ignorar
             }
 
+            _webSocket = null;
             _tcpClient = null;
             _reader = null;
             _writer = null;
@@ -492,6 +585,16 @@ namespace FractalTicTacToe.Core
 
             try
             {
+                _webSocket?.Abort();
+                _webSocket?.Dispose();
+            }
+            catch
+            {
+                // Ignorar
+            }
+
+            try
+            {
                 _tcpClient?.Close();
             }
             catch
@@ -499,6 +602,7 @@ namespace FractalTicTacToe.Core
                 // Ignorar
             }
 
+            _webSocket = null;
             _tcpClient = null;
             _reader = null;
             _writer = null;
@@ -543,15 +647,45 @@ namespace FractalTicTacToe.Core
         {
             try
             {
-                while (!ct.IsCancellationRequested && _reader != null)
+                if (_webSocket != null)
                 {
-                    string rawLine = await _reader.ReadLineAsync().ConfigureAwait(false);
-                    if (rawLine == null)
+                    var buffer = new byte[4096];
+                    var msgBuilder = new StringBuilder();
+                    while (!ct.IsCancellationRequested && _webSocket != null && _webSocket.State == WebSocketState.Open)
                     {
-                        break;
+                        WebSocketReceiveResult result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            break;
+                        }
+                        if (result.MessageType == WebSocketMessageType.Text)
+                        {
+                            msgBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                            if (result.EndOfMessage)
+                            {
+                                string payload = msgBuilder.ToString();
+                                msgBuilder.Clear();
+                                string[] lines = payload.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+                                foreach (string line in lines)
+                                {
+                                    ProcessServerPacket(line);
+                                }
+                            }
+                        }
                     }
+                }
+                else
+                {
+                    while (!ct.IsCancellationRequested && _reader != null)
+                    {
+                        string rawLine = await _reader.ReadLineAsync().ConfigureAwait(false);
+                        if (rawLine == null)
+                        {
+                            break;
+                        }
 
-                    ProcessServerPacket(rawLine);
+                        ProcessServerPacket(rawLine);
+                    }
                 }
             }
             catch
@@ -595,6 +729,19 @@ namespace FractalTicTacToe.Core
             {
                 if (_intentionalDisconnect) return false;
                 await Task.Delay(350).ConfigureAwait(false);
+
+                if (IsCloudHost(_lastHost))
+                {
+                    ClientWebSocket ws = await TryConnectWebSocketAsync($"wss://{NormalizeHost(_lastHost)}/", 1800).ConfigureAwait(false);
+                    if (ws != null)
+                    {
+                        _webSocket = ws;
+                        _receiveCts = new CancellationTokenSource();
+                        _ = ReceiveLoopAsync(_receiveCts.Token);
+                        SendRawLine(MultiplayerProtocol.BuildResume(_lastUsername, _lastPassword ?? string.Empty, roomToResume));
+                        return true;
+                    }
+                }
 
                 var tcp = new TcpClient();
                 try
@@ -1025,13 +1172,22 @@ namespace FractalTicTacToe.Core
             {
                 try
                 {
-                    if (_writer == null || _tcpClient == null || !_tcpClient.Connected)
+                    if (_webSocket != null && _webSocket.State == WebSocketState.Open)
                     {
-                        failed = true;
+                        byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
+                        _webSocket.SendAsync(
+                            new ArraySegment<byte>(bytes),
+                            WebSocketMessageType.Text,
+                            endOfMessage: true,
+                            CancellationToken.None).GetAwaiter().GetResult();
+                    }
+                    else if (_writer != null && _tcpClient != null && _tcpClient.Connected)
+                    {
+                        _writer.WriteLine(line);
                     }
                     else
                     {
-                        _writer.WriteLine(line);
+                        failed = true;
                     }
                 }
                 catch

@@ -1,0 +1,62 @@
+name: Empaquetado Android Release (.APK + .AAB)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-android-signed:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Descargar el código del repositorio
+      uses: actions/checkout@v4
+
+    - name: Configurar Java JDK 17 para Android
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'microsoft'
+        java-version: '17'
+
+    - name: Configurar .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Instalar workload de .NET MAUI Android
+      run: dotnet workload install maui-android
+
+    - name: Verificar o generar Keystore de Firma
+      run: |
+        if [ ! -f "FractalTicTacToe.Maui/gatote-release.keystore" ]; then
+          keytool -genkeypair -v \
+            -keystore FractalTicTacToe.Maui/gatote-release.keystore \
+            -alias gatote_key \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass "GatoteStore2026!" \
+            -keypass "GatoteStore2026!" \
+            -dname "CN=Gatote Fractal, OU=Mobile, O=Anahuac, L=Mexico, S=CDMX, C=MX"
+        fi
+
+    - name: Publicar paquetes firmados (.aab y .apk)
+      run: |
+        dotnet publish FractalTicTacToe.Maui/FractalTicTacToe.Maui.csproj \
+          -f net8.0-android \
+          -c Release \
+          -p:AndroidPackageFormats="aab;apk" \
+          -p:AndroidKeyStore=true \
+          -p:AndroidSigningKeyStore="gatote-release.keystore" \
+          -p:AndroidSigningKeyAlias="gatote_key" \
+          -p:AndroidSigningStorePass="GatoteStore2026!" \
+          -p:AndroidSigningKeyPass="GatoteStore2026!"
+
+    - name: Subir paquetes firmados (.APK y .AAB) como Artefacto
+      uses: actions/upload-artifact@v4
+      with:
+        name: gatote-fractal-android-release
+        path: |
+          FractalTicTacToe.Maui/bin/Release/net8.0-android/publish/*-Signed.apk
+          FractalTicTacToe.Maui/bin/Release/net8.0-android/publish/*-Signed.aab

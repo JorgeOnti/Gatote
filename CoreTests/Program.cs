@@ -926,6 +926,14 @@ namespace CoreTests
                     "El cliente reconectado debe sincronizar los 2 movimientos y el último tiro (4,0).");
                 Assert(!client.Clock.IsWaitingForFirstMove,
                     "Una partida reanudada con jugadas (MoveCount > 0) jamás debe mostrar la cuenta regresiva de 30s.");
+
+                // Verificar búsqueda de partida activa estilo Lichess (TryFindActiveRoomForPlayer) y servidor cloud por defecto
+                Assert(OnlineMultiplayerClient.OfficialCloudServerHost == "gatote-fractal-server.fly.dev",
+                    "El servidor en línea por defecto debe apuntar a gatote-fractal-server.fly.dev.");
+                Assert(mm.TryFindActiveRoomForPlayer(px.PlayerId, out OnlineMatchRoom foundRoomX, out Player foundRoleX),
+                    "TryFindActiveRoomForPlayer debe encontrar la sala activa de PlayerMovilX.");
+                Assert(foundRoomX.RoomId == room.RoomId && foundRoleX == Player.X,
+                    "La sala activa encontrada debe coincidir con RoomId y el rol X.");
             }
         }
 

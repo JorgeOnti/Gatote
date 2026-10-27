@@ -1,25 +1,31 @@
-# Configuración de despliegue en la nube para Fly.io (TCP en tiempo real puerto 7777)
-# Uso: fly launch --copy-config && fly volumes create gatote_data --size 1 && fly deploy
-app = "gatote-fractal-server"
-primary_region = "dfw"
+# fly.toml app configuration file generated for gatote-fractal-server on 2026-10-26T23:03:13-06:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'gatote-fractal-server'
+primary_region = 'dfw'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "7777"
-  SERVER_DATA_DIR = "/data"
+  PORT = '7777'
+  SERVER_DATA_DIR = '/data'
 
-[mounts]
-  source = "gatote_data"
-  destination = "/data"
+[[mounts]]
+  source = 'gatote_data'
+  destination = '/data'
 
-[[services]]
+[http_service]
   internal_port = 7777
-  protocol = "tcp"
-  auto_stop_machines = false
+  force_https = true
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
+  processes = ['app']
 
-  [[services.ports]]
-    port = 7777
+[[vm]]
+  memory = '256mb'
+  cpus = 1
+  memory_mb = 256

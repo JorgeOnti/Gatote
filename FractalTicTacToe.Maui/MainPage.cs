@@ -53,6 +53,7 @@ namespace FractalTicTacToe.Maui
         private IDispatcherTimer _frameTimer;
 
         private bool _isOnlineMode;
+        private bool _hasUnfinishedLocalMatch;
         private readonly InteractiveTutorialController _tutorial = new InteractiveTutorialController();
         private string _authenticatedUsername = string.Empty;
         private string _authenticatedPassword = string.Empty;
@@ -127,6 +128,8 @@ namespace FractalTicTacToe.Maui
         private Label _lobbyProfileSummaryLabel;
         private Label _lobbyLeagueBadgeLabel;
         private Label _lobbyNoticeLabel;
+        private Border _activeMatchesCard;
+        private VerticalStackLayout _activeMatchesStack;
         private Button _modeBotBtn;
         private Button _modeOnlineBtn;
         private Button _modePassPlayBtn;
@@ -200,7 +203,7 @@ namespace FractalTicTacToe.Maui
 
             GameLogger.ConfigureFileSink(Path.Combine(FileSystem.AppDataDirectory, "gatote.log"));
             _serverHost = ResolveInitialServerHost();
-            GameLogger.Info("UI.MAUI", $"Aplicación iniciada (Servidor inicial: {_serverHost}:{DefaultServerPort})");
+            GameLogger.Info("UI.MAUI", "Aplicación iniciada.");
             LoadLocalAccountsFromDisk();
 
             _localSession = new GameSessionController(
@@ -215,6 +218,7 @@ namespace FractalTicTacToe.Maui
             _onlineClient.AccountDeleted += OnOnlineAccountDeleted;
             _onlineClient.PrivateLobbyCreated += OnOnlinePrivateLobbyCreated;
             _onlineClient.MatchStarted += OnOnlineMatchStarted;
+            _onlineClient.SessionResumed += OnOnlineSessionResumed;
             _onlineClient.MatchEnded += OnOnlineMatchEnded;
             _onlineClient.ErrorReceived += OnOnlineErrorReceived;
             _onlineClient.ServerConnectionLost += OnOnlineServerConnectionLost;
@@ -232,20 +236,7 @@ namespace FractalTicTacToe.Maui
 
         private string ResolveInitialServerHost()
         {
-            string savedIp = LoadSavedServerHost();
-            if (!string.IsNullOrWhiteSpace(savedIp))
-            {
-                return savedIp;
-            }
-
-            if (DeviceInfo.Platform == DevicePlatform.Android)
-            {
-                // En un Android físico en la misma red Wi-Fi, apuntar por defecto a la IP LAN de la PC (192.168.1.84).
-                // En emulador Android, 10.0.2.2 redirige al localhost (127.0.0.1) de la PC anfitriona.
-                return DeviceInfo.DeviceType == DeviceType.Virtual ? "10.0.2.2" : PcLanDefaultIp;
-            }
-
-            return "127.0.0.1";
+            return OnlineMultiplayerClient.OfficialCloudServerHost;
         }
 
         private void StartClockTimer()
@@ -307,9 +298,10 @@ namespace FractalTicTacToe.Maui
                 }
             }
 
-            if (_isOnlineMode)
+            if (_onlineClient.IsInActiveMatch)
             {
                 if (_currentScreen == ScreenState.PlayArena &&
+                    _isOnlineMode &&
                     !_onlineClient.IsConnected &&
                     !_onlineClient.State.IsGameOver)
                 {
@@ -318,7 +310,8 @@ namespace FractalTicTacToe.Maui
                 }
                 _onlineClient.TickClock(delta);
             }
-            else
+
+            if (_hasUnfinishedLocalMatch && !_localSession.State.IsGameOver)
             {
                 _localSession.TickClock(delta);
             }
@@ -467,7 +460,6 @@ namespace FractalTicTacToe.Maui
                 ColumnDefinitions =
                 {
                     new ColumnDefinition { Width = GridLength.Star },
-                    new ColumnDefinition { Width = GridLength.Auto },
                     new ColumnDefinition { Width = GridLength.Auto }
                 },
                 RowDefinitions =
@@ -486,18 +478,6 @@ namespace FractalTicTacToe.Maui
                 TextColor = Colors.White,
                 VerticalOptions = LayoutOptions.Center
             };
-
-            _serverHostPillBtn = new Button
-            {
-                Text = $"Red: {_serverHost}",
-                FontSize = 11,
-                HeightRequest = 28,
-                Padding = new Thickness(8, 0),
-                CornerRadius = 8,
-                BackgroundColor = Color.FromRgb(32, 44, 66),
-                TextColor = LastMoveHighlightColor
-            };
-            _serverHostPillBtn.Clicked += OnConfigureServerHostClicked;
 
             _soundToggleBtn = new Button
             {
@@ -527,66 +507,12 @@ namespace FractalTicTacToe.Maui
             };
 
             grid.Add(brandTitle, 0, 0);
-            grid.Add(_serverHostPillBtn, 1, 0);
-            grid.Add(_soundToggleBtn, 2, 0);
+            grid.Add(_soundToggleBtn, 1, 0);
             grid.Add(_topHeaderSubtitleLabel, 0, 1);
-            Grid.SetColumnSpan(_topHeaderSubtitleLabel, 3);
+            Grid.SetColumnSpan(_topHeaderSubtitleLabel, 2);
 
             headerBorder.Content = grid;
             return headerBorder;
-        }
-
-        private async void OnConfigureServerHostClicked(object sender, EventArgs e)
-        {
-            string action = await DisplayActionSheet(
-                $"Servidor actual: {_serverHost}:{DefaultServerPort}",
-                "Cancelar",
-                null,
-                $"PC en Wi-Fi ({PcLanDefaultIp})",
-                "Emulador Android (10.0.2.2)",
-                "Local (127.0.0.1)",
-                "Escribir otra IP...");
-
-            if (string.IsNullOrEmpty(action) || action == "Cancelar")
-                return;
-
-            string newHost = _serverHost;
-            if (action.Contains(PcLanDefaultIp))
-                newHost = PcLanDefaultIp;
-            else if (action.Contains("10.0.2.2"))
-                newHost = "10.0.2.2";
-            else if (action.Contains("127.0.0.1"))
-                newHost = "127.0.0.1";
-            else if (action.StartsWith("Escribir"))
-            {
-                string custom = await DisplayPromptAsync(
-                    "IP del Servidor",
-                    "Dirección IPv4 donde corre el servidor:",
-                    "Guardar",
-                    "Cancelar",
-                    placeholder: PcLanDefaultIp,
-                    initialValue: _serverHost);
-                if (!string.IsNullOrWhiteSpace(custom))
-                    newHost = custom.Trim();
-            }
-
-            if (!string.IsNullOrWhiteSpace(newHost) && newHost != _serverHost)
-            {
-                _serverHost = newHost;
-                SaveServerHostToDisk(_serverHost);
-                _serverHostPillBtn.Text = $"Red: {_serverHost}";
-                if (_authFeedbackLabel != null)
-                {
-                    _authFeedbackLabel.Text = $"Servidor: {_serverHost}:{DefaultServerPort}";
-                }
-
-                // Si ya teníamos sesión iniciada, reconectar al nuevo host en segundo plano
-                _onlineClient.Disconnect();
-                if (!string.IsNullOrEmpty(_authenticatedUsername))
-                {
-                    _ = AuthenticateSavedSessionInBackgroundAsync(_authenticatedUsername, _authenticatedPassword);
-                }
-            }
         }
 
         private Border BuildBottomNavigationBar()
@@ -658,6 +584,7 @@ namespace FractalTicTacToe.Maui
 
             _bottomNavBar.IsVisible =
                 targetScreen == ScreenState.HomeLobby ||
+                targetScreen == ScreenState.PlayArena ||
                 targetScreen == ScreenState.AnalysisStudio ||
                 targetScreen == ScreenState.ProfileAndLeagues;
 
@@ -751,7 +678,7 @@ namespace FractalTicTacToe.Maui
 
             _authFeedbackLabel = new Label
             {
-                Text = $"Servidor: {_serverHost}:{DefaultServerPort}",
+                Text = string.Empty,
                 FontSize = 12,
                 TextColor = LastMoveHighlightColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -980,6 +907,23 @@ namespace FractalTicTacToe.Maui
             accountStack.Add(_lobbyNoticeLabel);
             accountCard.Content = accountStack;
             col.Add(accountCard);
+
+            // 1B. Recuadro de Partidas Activas (Estilo Lichess: permite regresar a una partida en curso si saliste a Inicio)
+            _activeMatchesCard = CreateCardBorder(Color.FromRgb(22, 42, 38), ActiveMacroBorderColor, strokeThickness: 2, cornerRadius: 12, padding: new Thickness(12, 8));
+            _activeMatchesCard.IsVisible = false;
+            var activeOuterStack = new VerticalStackLayout { Spacing = 6 };
+            activeOuterStack.Add(new Label
+            {
+                Text = "PARTIDAS ACTIVAS",
+                FontSize = 12,
+                FontAttributes = FontAttributes.Bold,
+                TextColor = ActiveMacroBorderColor,
+                HorizontalTextAlignment = TextAlignment.Center
+            });
+            _activeMatchesStack = new VerticalStackLayout { Spacing = 6 };
+            activeOuterStack.Add(_activeMatchesStack);
+            _activeMatchesCard.Content = activeOuterStack;
+            col.Add(_activeMatchesCard);
 
             // 2. Selector de Modo de Juego
             col.Add(new Label
@@ -1269,6 +1213,7 @@ namespace FractalTicTacToe.Maui
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
+            _hasUnfinishedLocalMatch = true;
             _currentHintMove = null;
 
             _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
@@ -1290,6 +1235,7 @@ namespace FractalTicTacToe.Maui
             if (_selectedOpponentType == LobbyOpponentType.LocalPassAndPlay)
             {
                 _isOnlineMode = false;
+                _hasUnfinishedLocalMatch = true;
                 _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador 1";
                 _localSession.SetTimeControl(selectedTime);
                 _localSession.ConfigureSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, _localSession.ProfileX);
@@ -1427,6 +1373,14 @@ namespace FractalTicTacToe.Maui
                 _currentHintMove = null;
                 UpdateLobbyModeVisibility();
                 NavigateToScreen(ScreenState.PlayArena);
+            });
+        }
+
+        private void OnOnlineSessionResumed(string roomId)
+        {
+            Dispatcher.Dispatch(() =>
+            {
+                RefreshUI();
             });
         }
 
@@ -2067,7 +2021,7 @@ namespace FractalTicTacToe.Maui
             RefreshUI();
         }
 
-        private void OnResignOrLeavePressed()
+        private async void OnResignOrLeavePressed()
         {
             if (_isOnlineMode)
             {
@@ -2078,6 +2032,18 @@ namespace FractalTicTacToe.Maui
                 }
                 if (_onlineClient.IsInActiveMatch)
                 {
+                    if (_onlineClient.State.MoveCount > 0)
+                    {
+                        bool confirmResign = await DisplayAlert(
+                            "Rendirse",
+                            "¿Seguro que deseas rendirte en esta partida? Si solo quieres volver al menú sin rendirte, toca 'Inicio' abajo.",
+                            "Rendirse",
+                            "Cancelar");
+                        if (!confirmResign)
+                        {
+                            return;
+                        }
+                    }
                     _onlineClient.ResignMatch();
                 }
                 return;
@@ -2120,7 +2086,132 @@ namespace FractalTicTacToe.Maui
             }
 
             _localSession.StartNewMatch();
+            _hasUnfinishedLocalMatch = true;
             RefreshUI();
+        }
+
+        private void ResumeActiveOnlineMatch()
+        {
+            if (!_onlineClient.IsInActiveMatch) return;
+            TriggerSubtleHaptic();
+            ExitTutorialMode();
+            _isOnlineMode = true;
+            _currentHintMove = null;
+            NavigateToScreen(ScreenState.PlayArena);
+        }
+
+        private void ResumeActiveLocalMatch()
+        {
+            if (_localSession.State.IsGameOver) return;
+            TriggerSubtleHaptic();
+            ExitTutorialMode();
+            _isOnlineMode = false;
+            _currentHintMove = null;
+            NavigateToScreen(ScreenState.PlayArena);
+        }
+
+        private void DiscardActiveLocalMatch()
+        {
+            TriggerSubtleHaptic();
+            _hasUnfinishedLocalMatch = false;
+            _localSession.StartNewMatch();
+            RefreshUI();
+        }
+
+        private void RefreshActiveMatchesCardUI()
+        {
+            if (_activeMatchesCard == null || _activeMatchesStack == null)
+            {
+                return;
+            }
+
+            if (_localSession.State.IsGameOver)
+            {
+                _hasUnfinishedLocalMatch = false;
+            }
+
+            bool hasOnlineActive = _onlineClient.IsInActiveMatch;
+            bool hasLocalActive = _hasUnfinishedLocalMatch && !_localSession.State.IsGameOver;
+
+            _activeMatchesStack.Children.Clear();
+
+            if (!hasOnlineActive && !hasLocalActive)
+            {
+                _activeMatchesCard.IsVisible = false;
+                return;
+            }
+
+            _activeMatchesCard.IsVisible = true;
+
+            if (hasOnlineActive)
+            {
+                string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Rival";
+                Player myRole = _onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X;
+                bool isMyTurn = _onlineClient.State.CurrentPlayer == myRole;
+                string turnText = isMyTurn ? "Tu turno" : $"Turno de {oppName}";
+                string summary = $"En línea vs {oppName} ({_onlineClient.Clock.Config.Name})\nJugada {_onlineClient.State.MoveCount} • {turnText}";
+
+                var row = new Grid
+                {
+                    ColumnDefinitions =
+                    {
+                        new ColumnDefinition { Width = GridLength.Star },
+                        new ColumnDefinition { Width = GridLength.Auto }
+                    },
+                    ColumnSpacing = 8
+                };
+
+                var lbl = new Label
+                {
+                    Text = summary,
+                    FontSize = 12,
+                    TextColor = Colors.White,
+                    VerticalOptions = LayoutOptions.Center
+                };
+                var resumeBtn = CreateActionButton("Regresar", ResumeActiveOnlineMatch, height: 36, fontSize: 12);
+                resumeBtn.BackgroundColor = Color.FromRgb(30, 92, 68);
+
+                row.Add(lbl, 0, 0);
+                row.Add(resumeBtn, 1, 0);
+                _activeMatchesStack.Add(row);
+            }
+
+            if (hasLocalActive)
+            {
+                bool isVsAi = _localSession.Mode == SessionMode.HumanVsBotX || _localSession.Mode == SessionMode.BotVsHumanO;
+                string modeDesc = isVsAi
+                    ? $"Contra IA ({FormatDifficultyLabel(_localSession.BotDifficulty)})"
+                    : $"2 Jugadores ({_localSession.Clock.Config.Name})";
+                string summary = $"{modeDesc}\nJugada {_localSession.State.MoveCount} • Turno de [{_localSession.State.CurrentPlayer}]";
+
+                var row = new Grid
+                {
+                    ColumnDefinitions =
+                    {
+                        new ColumnDefinition { Width = GridLength.Star },
+                        new ColumnDefinition { Width = GridLength.Auto },
+                        new ColumnDefinition { Width = GridLength.Auto }
+                    },
+                    ColumnSpacing = 6
+                };
+
+                var lbl = new Label
+                {
+                    Text = summary,
+                    FontSize = 12,
+                    TextColor = Colors.White,
+                    VerticalOptions = LayoutOptions.Center
+                };
+                var resumeBtn = CreateActionButton("Regresar", ResumeActiveLocalMatch, height: 36, fontSize: 12);
+                resumeBtn.BackgroundColor = Color.FromRgb(30, 92, 68);
+                var closeBtn = CreateActionButton("Cerrar", DiscardActiveLocalMatch, height: 36, fontSize: 11);
+                closeBtn.BackgroundColor = Color.FromRgb(68, 28, 36);
+
+                row.Add(lbl, 0, 0);
+                row.Add(resumeBtn, 1, 0);
+                row.Add(closeBtn, 2, 0);
+                _activeMatchesStack.Add(row);
+            }
         }
 
         private void OnOpenCurrentMatchInAnalysisPressed()
@@ -2248,7 +2339,7 @@ namespace FractalTicTacToe.Maui
             string onlineRank = EloRatingCalculator.GetRankTitle(onlineRating);
 
             _topHeaderSubtitleLabel.Text = _currentScreen == ScreenState.AuthScreen
-                ? $"Servidor {_serverHost}:{DefaultServerPort}"
+                ? "Acceso"
                 : $"{displayUser} • {onlineRating} pts ({onlineRank})";
 
             _lobbyProfileSummaryLabel.Text = displayUser;
@@ -2256,6 +2347,7 @@ namespace FractalTicTacToe.Maui
                 $"{onlineRating} pts • Liga {onlineRank} • " +
                 $"{_onlineClient.LocalWins}V {_onlineClient.LocalLosses}D {_onlineClient.LocalDraws}E";
 
+            RefreshActiveMatchesCardUI();
             UpdateLobbyModeVisibility();
 
             _takebackOfferPanel.IsVisible = _isOnlineMode && _onlineClient.HasIncomingTakebackOffer;

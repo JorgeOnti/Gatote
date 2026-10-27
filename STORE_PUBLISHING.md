@@ -12,25 +12,37 @@ Esta guía resume los pasos listos en el repositorio para publicar **Gatote Frac
 
 ---
 
-## 2. Publicar en Google Play Store (`.aab` — Android App Bundle)
+## 2. Publicar en Google Play Store (`.aab` y `.apk` Firmados)
 
+### Opción A: Script Automático en 1 Comando (Local)
+Ejecuta en PowerShell desde la raíz del proyecto:
+```powershell
+.\publicar_android.ps1
+```
+El script detecta `keytool.exe` automáticamente, usa la llave [`FractalTicTacToe.Maui/gatote-release.keystore`](./FractalTicTacToe.Maui/gatote-release.keystore) y genera ambos paquetes firmados en `FractalTicTacToe.Maui/bin/Release/net8.0-android/publish/`:
+- **`com.anahuac.gatotefractal-Signed.aab`** (Android App Bundle listo para subir a **Google Play Console**).
+- **`com.anahuac.gatotefractal-Signed.apk`** (APK firmado listo para instalar directamente en dispositivos Android).
+
+### Opción B: Descarga Directa desde GitHub Actions (Sin instalar SDK local)
+En cada `git push` a `master`, el workflow [`.github/workflows/android-release.yml`](./.github/workflows/android-release.yml) compila y firma en la nube ambos archivos (`.apk` y `.aab`) y los publica como artefacto descargable **`gatote-fractal-android-release`** en la pestaña **Actions** de tu repositorio de GitHub.
+
+### Opción C: Comandos Manuales
 1. **Generar tu llave de firma (`gatote-release.keystore`):**
    ```powershell
    .\scripts\generate-android-keystore.ps1
    ```
-2. **Compilar el paquete `.aab` firmado en modo `Release`:**
+2. **Compilar los paquetes `.aab` y `.apk` firmados en modo `Release`:**
    ```powershell
    dotnet publish FractalTicTacToe.Maui/FractalTicTacToe.Maui.csproj `
      -f net8.0-android `
      -c Release `
+     -p:AndroidPackageFormats="aab;apk" `
      -p:AndroidKeyStore=true `
-     -p:AndroidSigningKeyStore="..\gatote-release.keystore" `
+     -p:AndroidSigningKeyStore="gatote-release.keystore" `
      -p:AndroidSigningKeyAlias="gatote_key" `
-     -p:AndroidSigningKeyPass="<TU_PASSWORD>" `
-     -p:AndroidSigningStorePass="<TU_PASSWORD>"
+     -p:AndroidSigningKeyPass="GatoteStore2026!" `
+     -p:AndroidSigningStorePass="GatoteStore2026!"
    ```
-   *(También puedes hacerlo desde Visual Studio 2022 haciendo clic derecho sobre `FractalTicTacToe.Maui` -> **Publish...** -> **Google Play**).*
-3. El archivo firmado `com.anahuac.gatotefractal-Signed.aab` se generará en `FractalTicTacToe.Maui/bin/Release/net8.0-android/publish/`.
 
 ---
 

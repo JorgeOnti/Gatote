@@ -14,7 +14,7 @@ namespace FractalTicTacToe.GodotClient
     /// </summary>
     public partial class MobileGameScreen : Control
     {
-        private const string DefaultServerHost = "127.0.0.1";
+        private const string DefaultServerHost = OnlineMultiplayerClient.OfficialCloudServerHost;
         private const int DefaultServerPort = 7777;
         private const string LocalAccountsFilePath = "user://local_accounts.tsv";
         private const string SavedSessionFilePath = "user://AuthData/saved_session.txt";
@@ -45,6 +45,7 @@ namespace FractalTicTacToe.GodotClient
         private OnlineMultiplayerClient _onlineClient;
         private readonly MatchmakingService _localAuthStore = new MatchmakingService();
         private bool _isOnlineMode;
+        private bool _hasUnfinishedLocalMatch;
         private readonly InteractiveTutorialController _tutorial = new InteractiveTutorialController();
         private string _authenticatedUsername = string.Empty;
         private string _authenticatedPassword = string.Empty;
@@ -103,6 +104,8 @@ namespace FractalTicTacToe.GodotClient
         // =====================================================================
         private Label _lobbyProfileSummaryLabel;
         private Label _lobbyLeagueBadgeLabel;
+        private PanelContainer _activeMatchesPanel;
+        private VBoxContainer _activeMatchesListContainer;
         private Button _modeBotBtn;
         private Button _modeOnlineBtn;
         private Button _modePassPlayBtn;
@@ -242,6 +245,7 @@ namespace FractalTicTacToe.GodotClient
             _onlineClient.Authenticated += OnOnlineAuthenticated;
             _onlineClient.AccountDeleted += OnOnlineAccountDeleted;
             _onlineClient.MatchStarted += OnOnlineMatchStarted;
+            _onlineClient.SessionResumed += OnOnlineSessionResumed;
             _onlineClient.MatchEnded += OnOnlineMatchEnded;
             _onlineClient.ServerConnectionLost += OnServerConnectionLost;
             _onlineClient.PrivateLobbyCreated += OnPrivateLobbyCreated;
@@ -335,19 +339,18 @@ namespace FractalTicTacToe.GodotClient
                 }
             }
 
-            // Si estábamos en una partida en línea y el servidor se cayó, cancelar sin puntos y volver a Inicio
-            if (_isOnlineMode && _currentScreen == ScreenState.PlayArena &&
-                !_onlineClient.IsConnected && !_onlineClient.State.IsGameOver)
+            if (_onlineClient.IsInActiveMatch)
             {
-                _onlineClient.HandleUnexpectedServerDisconnect();
-                return;
-            }
-
-            if (_isOnlineMode)
-            {
+                if (_currentScreen == ScreenState.PlayArena && _isOnlineMode &&
+                    !_onlineClient.IsConnected && !_onlineClient.State.IsGameOver)
+                {
+                    _onlineClient.HandleUnexpectedServerDisconnect();
+                    return;
+                }
                 _onlineClient.TickClock(delta);
             }
-            else
+
+            if (_hasUnfinishedLocalMatch && !_localSession.State.IsGameOver)
             {
                 _localSession.TickClock(delta);
             }
@@ -698,9 +701,9 @@ namespace FractalTicTacToe.GodotClient
             _analysisScreenContainer.Visible = targetScreen == ScreenState.AnalysisStudio;
             _profileScreenContainer.Visible = targetScreen == ScreenState.ProfileAndLeagues;
 
-            // La barra inferior solo es visible en las 3 pantallas del menú principal
             _bottomNavPanel.Visible =
                 targetScreen == ScreenState.HomeLobby ||
+                targetScreen == ScreenState.PlayArena ||
                 targetScreen == ScreenState.AnalysisStudio ||
                 targetScreen == ScreenState.ProfileAndLeagues;
 
@@ -864,8 +867,8 @@ namespace FractalTicTacToe.GodotClient
             _loginBtn.Disabled = true;
             _registerBtn.Disabled = true;
             _authFeedbackLabel.Text = isRegister
-                ? $"Registrando cuenta '{username}' en {DefaultServerHost}:{DefaultServerPort}..."
-                : $"Iniciando sesión como '{username}' en {DefaultServerHost}:{DefaultServerPort}...";
+                ? $"Creando cuenta '{username}'..."
+                : $"Iniciando sesión como '{username}'...";
             _authFeedbackLabel.AddThemeColorOverride("font_color", LastMoveHighlightColor);
 
             try
@@ -1092,6 +1095,30 @@ namespace FractalTicTacToe.GodotClient
             accountBox.AddChild(_lobbyLeagueBadgeLabel);
             accountCard.AddChild(accountBox);
             col.AddChild(accountCard);
+
+            // 1B. Recuadro de Partidas Activas (Estilo Lichess: permite regresar a una partida en curso desde Inicio)
+            _activeMatchesPanel = CreateStyledPanel(
+                new Color(0.09f, 0.17f, 0.15f),
+                ActiveMacroBorderColor,
+                borderWidth: 2,
+                cornerRadius: 14,
+                contentMargin: 12);
+            _activeMatchesPanel.Visible = false;
+            var activeOuterCol = new VBoxContainer();
+            activeOuterCol.AddThemeConstantOverride("separation", 8);
+            var activeHeaderLbl = new Label
+            {
+                Text = "PARTIDAS ACTIVAS",
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            activeHeaderLbl.AddThemeFontSizeOverride("font_size", 18);
+            activeHeaderLbl.AddThemeColorOverride("font_color", ActiveMacroBorderColor);
+            activeOuterCol.AddChild(activeHeaderLbl);
+            _activeMatchesListContainer = new VBoxContainer();
+            _activeMatchesListContainer.AddThemeConstantOverride("separation", 8);
+            activeOuterCol.AddChild(_activeMatchesListContainer);
+            _activeMatchesPanel.AddChild(activeOuterCol);
+            col.AddChild(_activeMatchesPanel);
 
             // 2. Selector de Modalidad de Juego
             var modeSectionTitle = new Label
@@ -1373,6 +1400,7 @@ namespace FractalTicTacToe.GodotClient
             ExitTutorialMode();
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
+            _hasUnfinishedLocalMatch = true;
             _currentHintMove = null;
             _lastAnimatedMove = null;
             _victoryLineAnimated = false;
@@ -1398,6 +1426,7 @@ namespace FractalTicTacToe.GodotClient
             if (_selectedOpponentType == LobbyOpponentType.LocalPassAndPlay)
             {
                 _isOnlineMode = false;
+                _hasUnfinishedLocalMatch = true;
                 _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador 1";
                 _localSession.SetTimeControl(selectedTime);
                 _localSession.ConfigureSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, _localSession.ProfileX);
@@ -1544,6 +1573,11 @@ namespace FractalTicTacToe.GodotClient
                 UpdateLobbyModeVisibility();
                 NavigateToScreen(ScreenState.PlayArena);
             }).CallDeferred();
+        }
+
+        private void OnOnlineSessionResumed(string roomId)
+        {
+            Callable.From(RefreshUI).CallDeferred();
         }
 
         private void OnOnlineMatchEnded(Player winner, MatchEndReason reason, EloMatchUpdate eloUpdate)
@@ -2427,7 +2461,116 @@ namespace FractalTicTacToe.GodotClient
             }
 
             _localSession.StartNewMatch();
+            _hasUnfinishedLocalMatch = true;
             RefreshUI();
+        }
+
+        private void ResumeActiveOnlineMatch()
+        {
+            if (!_onlineClient.IsInActiveMatch) return;
+            ExitTutorialMode();
+            _isOnlineMode = true;
+            _currentHintMove = null;
+            NavigateToScreen(ScreenState.PlayArena);
+        }
+
+        private void ResumeActiveLocalMatch()
+        {
+            if (_localSession.State.IsGameOver) return;
+            ExitTutorialMode();
+            _isOnlineMode = false;
+            _currentHintMove = null;
+            NavigateToScreen(ScreenState.PlayArena);
+        }
+
+        private void DiscardActiveLocalMatch()
+        {
+            _hasUnfinishedLocalMatch = false;
+            _localSession.StartNewMatch();
+            RefreshUI();
+        }
+
+        private void RefreshActiveMatchesPanelUI()
+        {
+            if (_activeMatchesPanel == null || _activeMatchesListContainer == null)
+            {
+                return;
+            }
+
+            if (_localSession.State.IsGameOver)
+            {
+                _hasUnfinishedLocalMatch = false;
+            }
+
+            bool hasOnlineActive = _onlineClient.IsInActiveMatch;
+            bool hasLocalActive = _hasUnfinishedLocalMatch && !_localSession.State.IsGameOver;
+
+            foreach (Node child in _activeMatchesListContainer.GetChildren())
+            {
+                child.QueueFree();
+            }
+
+            if (!hasOnlineActive && !hasLocalActive)
+            {
+                _activeMatchesPanel.Visible = false;
+                return;
+            }
+
+            _activeMatchesPanel.Visible = true;
+
+            if (hasOnlineActive)
+            {
+                string oppName = !string.IsNullOrEmpty(_onlineClient.OpponentUsername) ? _onlineClient.OpponentUsername : "Rival";
+                Player myRole = _onlineClient.AssignedRole != Player.None ? _onlineClient.AssignedRole : Player.X;
+                bool isMyTurn = _onlineClient.State.CurrentPlayer == myRole;
+                string turnText = isMyTurn ? "Tu turno" : $"Turno de {oppName}";
+
+                var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+                row.AddThemeConstantOverride("separation", 10);
+                var lbl = new Label
+                {
+                    Text = $"En línea vs {oppName} ({_onlineClient.Clock.Config.Name}) • Jugada {_onlineClient.State.MoveCount} ({turnText})",
+                    SizeFlagsHorizontal = SizeFlags.ExpandFill,
+                    AutowrapMode = TextServer.AutowrapMode.WordSmart
+                };
+                lbl.AddThemeFontSizeOverride("font_size", 17);
+                var resumeBtn = CreateActionButton("Regresar", ResumeActiveOnlineMatch, minHeight: 44);
+                resumeBtn.CustomMinimumSize = new Vector2(120, 44);
+                resumeBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
+
+                row.AddChild(lbl);
+                row.AddChild(resumeBtn);
+                _activeMatchesListContainer.AddChild(row);
+            }
+
+            if (hasLocalActive)
+            {
+                bool isVsAi = _localSession.Mode == SessionMode.HumanVsBotX || _localSession.Mode == SessionMode.BotVsHumanO;
+                string modeDesc = isVsAi
+                    ? $"Contra IA ({_localSession.BotDifficulty})"
+                    : $"2 Jugadores ({_localSession.Clock.Config.Name})";
+
+                var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+                row.AddThemeConstantOverride("separation", 8);
+                var lbl = new Label
+                {
+                    Text = $"{modeDesc} • Jugada {_localSession.State.MoveCount} (Turno de {_localSession.State.CurrentPlayer})",
+                    SizeFlagsHorizontal = SizeFlags.ExpandFill,
+                    AutowrapMode = TextServer.AutowrapMode.WordSmart
+                };
+                lbl.AddThemeFontSizeOverride("font_size", 17);
+                var resumeBtn = CreateActionButton("Regresar", ResumeActiveLocalMatch, minHeight: 44);
+                resumeBtn.CustomMinimumSize = new Vector2(115, 44);
+                resumeBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
+                var closeBtn = CreateActionButton("Cerrar", DiscardActiveLocalMatch, minHeight: 44);
+                closeBtn.CustomMinimumSize = new Vector2(95, 44);
+                closeBtn.SizeFlagsHorizontal = SizeFlags.ShrinkEnd;
+
+                row.AddChild(lbl);
+                row.AddChild(resumeBtn);
+                row.AddChild(closeBtn);
+                _activeMatchesListContainer.AddChild(row);
+            }
         }
 
         private void OnAnySessionStateChanged()
@@ -2459,6 +2602,7 @@ namespace FractalTicTacToe.GodotClient
                 $"{onlineRating} pts • Liga {onlineRank} • " +
                 $"{_onlineClient.LocalWins}V - {_onlineClient.LocalLosses}D - {_onlineClient.LocalDraws}E";
 
+            RefreshActiveMatchesPanelUI();
             UpdateLobbyModeVisibility();
 
             _takebackOfferPanel.Visible = _isOnlineMode && _onlineClient.HasIncomingTakebackOffer;
