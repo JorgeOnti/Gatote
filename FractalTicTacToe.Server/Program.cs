@@ -46,6 +46,8 @@ namespace FractalTicTacToe.Server
             }
 
             Matchmaking.LoadFromDirectory(DataDirectory);
+            GameLogger.ConfigureFileSink(Path.Combine(DataDirectory, "server.log"));
+            GameLogger.Info("SERVER", $"Servidor TCP iniciado en puerto {port} (Datos: {DataDirectory}).");
 
             Console.WriteLine("╔══════════════════════════════════════════════════════════════════════╗");
             Console.WriteLine("║      FRACTAL TIC-TAC-TOE  •  SERVIDOR MULTIJUGADOR AUTORITATIVO     ║");
@@ -466,7 +468,9 @@ namespace FractalTicTacToe.Server
 
         private static void BindRoomEventsAndNotifyStart(OnlineMatchRoom room)
         {
-            Console.WriteLine($"[PARTIDA INICIADA] Sala {room.RoomId} ({room.TimeControl.Name}): [X] {room.PlayerX.Username} vs [O] {room.PlayerO.Username}");
+            string startMsg = $"Sala {room.RoomId} ({room.TimeControl.Name}): [X] {room.PlayerX.Username} vs [O] {room.PlayerO.Username}";
+            Console.WriteLine($"[PARTIDA INICIADA] {startMsg}");
+            GameLogger.Info("SERVER", $"Partida iniciada — {startMsg}");
 
             if (ConnectedClientsByPlayerId.TryGetValue(room.PlayerX.PlayerId, out ClientConnection clientX))
             {
@@ -515,9 +519,11 @@ namespace FractalTicTacToe.Server
                 string packet = MultiplayerProtocol.BuildMatchEnd(r, record, eloUpdate);
                 BroadcastToRoom(r, packet);
                 Matchmaking.SaveToDirectory(DataDirectory);
-                Console.WriteLine(
-                    $"[FIN DE PARTIDA] Sala {r.RoomId} | Ganador: {record.Winner} ({record.EndReason}) | " +
-                    $"Pts X: {record.PlayerXEloBefore}->{record.PlayerXEloAfter}, Pts O: {record.PlayerOEloBefore}->{record.PlayerOEloAfter}");
+                string endMsg =
+                    $"Sala {r.RoomId} | Ganador: {record.Winner} ({record.EndReason}) | " +
+                    $"Pts X: {record.PlayerXEloBefore}->{record.PlayerXEloAfter}, Pts O: {record.PlayerOEloBefore}->{record.PlayerOEloAfter}";
+                Console.WriteLine($"[FIN DE PARTIDA] {endMsg}");
+                GameLogger.Info("SERVER", $"Fin de partida — {endMsg}");
             };
         }
 

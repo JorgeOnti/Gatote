@@ -162,10 +162,12 @@ namespace FractalTicTacToe.Core
 
             if (connectedClient == null)
             {
+                GameLogger.Warn("NET", $"No se pudo conectar al servidor ({host}:{port}).");
                 throw new TimeoutException("No se pudo conectar al servidor.");
             }
 
             _lastHost = winningHost;
+            GameLogger.Info("NET", $"Conectado exitosamente al servidor {winningHost}:{port}.");
             _tcpClient = connectedClient;
             NetworkStream stream = _tcpClient.GetStream();
             _reader = new StreamReader(stream, Encoding.UTF8);
@@ -526,6 +528,7 @@ namespace FractalTicTacToe.Core
                 ? "Se perdió la conexión con el servidor. La partida fue cancelada sin cambio de puntos."
                 : customMessage;
 
+            GameLogger.Warn("NET", $"Desconexión inesperada del servidor. Partida abortada sin cambio de puntos.");
             ServerConnectionLost?.Invoke(msg);
             Disconnected?.Invoke();
             StateChanged?.Invoke();
@@ -740,6 +743,7 @@ namespace FractalTicTacToe.Core
                         }
 
                         State = GameSerializer.FromFen(parts[7]);
+                        GameLogger.Info("MATCH", $"Partida en línea iniciada: Sala {ActiveRoomId}, Rol [{AssignedRole}], {userX} vs {userO} ({roomTimeControl.Name}).");
                         MatchStarted?.Invoke(ActiveRoomId, AssignedRole, userX, eloX, userO, eloO);
                         StateChanged?.Invoke();
                     }
@@ -791,6 +795,7 @@ namespace FractalTicTacToe.Core
                         }
 
                         SessionResumed?.Invoke(ActiveRoomId);
+                        GameLogger.Info("NET", $"Sesión reanudada en sala {ActiveRoomId} con rol [{AssignedRole}].");
                         StateChanged?.Invoke();
                     }
                     break;

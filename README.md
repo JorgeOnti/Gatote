@@ -36,7 +36,9 @@ Gatote/
 │   ├── MatchmakingService.cs      # Registro/Login/DeleteAccount con SHA-256, cola filtrada por modo de tiempo e historial
 │   ├── OnlineMatchRoom.cs         # Sala autoritativa Anti-Cheat, Takeback mutuo, Timeout, Abort y Revancha
 │   ├── OnlineMultiplayerClient.cs # Cliente TCP asíncrono compartido entre MAUI, Godot 4 y Consola
-│   ├── MatchReplayNavigator.cs    # Motor de sala de análisis y repetición jugada por jugada
+│   ├── MatchReplayNavigator.cs    # Motor de sala de análisis y clasificación humana de jugadas
+│   ├── InteractiveTutorialController.cs # Controlador aislado para el tutorial interactivo de 3 pasos
+│   ├── GameLogger.cs              # Sistema centralizado y thread-safe de bitácora (Logs en memoria y disco)
 │   └── SoundEffectsSynthesizer.cs # Sintetizador procedural PCM/WAV de 16 bits en memoria + Política de Privacidad
 ├── Assets/                        # Arte comercial oficial del juego
 │   ├── gatote_icon.png            # Icono oficial de la app móvil (512×512)
@@ -47,7 +49,7 @@ Gatote/
 │   └── Scripts/MobileGameScreen.cs# Interfaz multi-pantalla con Splash + Barra de Progreso y AudioStreamWav
 ├── FractalTicTacToe.Server/       # Servidor TCP dedicado autoritativo (Puerto 7777 / Variable PORT en nube)
 ├── FractalTicTacToe.ConsoleApp/   # Cliente interactivo en consola con telemetría en vivo
-├── CoreTests/                     # Suite automatizada de 21 pruebas unitarias y de integración
+├── CoreTests/                     # Suite automatizada de 26 pruebas unitarias y de integración
 ├── Dockerfile & docker-compose.yml# Empaquetado en contenedor Docker para despliegue en la nube (Render/Railway/Fly.io)
 ├── PRIVACY_POLICY.md              # Política de Privacidad oficial para Google Play Store y Apple App Store
 ├── STORE_PUBLISHING.md            # Guía paso a paso de firma y publicación (.aab y .ipa)

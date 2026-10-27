@@ -53,8 +53,7 @@ namespace FractalTicTacToe.Maui
         private IDispatcherTimer _frameTimer;
 
         private bool _isOnlineMode;
-        private bool _isTutorialMode;
-        private int _tutorialStep;
+        private readonly InteractiveTutorialController _tutorial = new InteractiveTutorialController();
         private string _authenticatedUsername = string.Empty;
         private string _authenticatedPassword = string.Empty;
         private double _queueElapsedSeconds;
@@ -199,7 +198,9 @@ namespace FractalTicTacToe.Maui
             BackgroundColor = BgColor;
             NavigationPage.SetHasNavigationBar(this, false);
 
+            GameLogger.ConfigureFileSink(Path.Combine(FileSystem.AppDataDirectory, "gatote.log"));
             _serverHost = ResolveInitialServerHost();
+            GameLogger.Info("UI.MAUI", $"Aplicación iniciada (Servidor inicial: {_serverHost}:{DefaultServerPort})");
             LoadLocalAccountsFromDisk();
 
             _localSession = new GameSessionController(
@@ -614,8 +615,22 @@ namespace FractalTicTacToe.Maui
             return navBorder;
         }
 
+        private void ExitTutorialMode()
+        {
+            if (_tutorial.IsActive || _tutorial.CurrentStep != 0)
+            {
+                _tutorial.Exit();
+                _currentHintMove = null;
+            }
+        }
+
         private void NavigateToScreen(ScreenState targetScreen)
         {
+            if (targetScreen != ScreenState.PlayArena)
+            {
+                ExitTutorialMode();
+            }
+
             if (_currentScreen == ScreenState.HomeLobby &&
                 targetScreen != ScreenState.HomeLobby &&
                 targetScreen != ScreenState.PlayArena &&
@@ -801,6 +816,22 @@ namespace FractalTicTacToe.Maui
                 "Cerrar");
         }
 
+        private async void OnShowSystemLogsClicked()
+        {
+            string logText = GameLogger.ExportFormattedText(30);
+            bool clear = await DisplayAlert(
+                "Registro de Eventos (Logs)",
+                logText,
+                "Limpiar",
+                "Cerrar");
+
+            if (clear)
+            {
+                GameLogger.Clear();
+                GameLogger.Info("UI.MAUI", "Registro de eventos limpiado por el usuario.");
+            }
+        }
+
         private async void OnSubmitAuthPressed(bool isRegister)
         {
             string username = _authUsernameInput.Text?.Trim() ?? string.Empty;
@@ -944,15 +975,9 @@ namespace FractalTicTacToe.Maui
                 IsVisible = false
             };
 
-            var openTutorialBtn = CreateActionButton("Cómo jugar (Tutorial interactivo)", StartInteractiveTutorial, height: 38, fontSize: 13);
-            openTutorialBtn.BackgroundColor = Color.FromRgb(26, 56, 82);
-            openTutorialBtn.BorderColor = ActiveMacroBorderColor;
-            openTutorialBtn.BorderWidth = 1.5;
-
             accountStack.Add(_lobbyProfileSummaryLabel);
             accountStack.Add(_lobbyLeagueBadgeLabel);
             accountStack.Add(_lobbyNoticeLabel);
-            accountStack.Add(openTutorialBtn);
             accountCard.Content = accountStack;
             col.Add(accountCard);
 
@@ -1164,6 +1189,8 @@ namespace FractalTicTacToe.Maui
 
         private void SelectLobbyOpponentType(LobbyOpponentType type)
         {
+            ExitTutorialMode();
+
             if (_onlineClient.IsInQueue || !string.IsNullOrEmpty(_onlineClient.PendingInviteCode))
             {
                 _onlineClient.CancelMatchmakingQueue();
@@ -1223,15 +1250,14 @@ namespace FractalTicTacToe.Maui
         private void StartInteractiveTutorial()
         {
             TriggerSubtleHaptic();
+            if (_onlineClient.IsInQueue || !string.IsNullOrEmpty(_onlineClient.PendingInviteCode))
+            {
+                _onlineClient.CancelMatchmakingQueue();
+            }
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _isOnlineMode = false;
-            _isTutorialMode = true;
-            _tutorialStep = 1;
-
-            _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
-            _localSession.SetTimeControl(TimeControlConfig.Unlimited);
-            _localSession.ConfigureSession(SessionMode.PassAndPlay2P, BotDifficulty.Easy, _localSession.ProfileX);
-            _currentHintMove = new Move(4, 0);
+            _tutorial.Start();
+            _currentHintMove = _tutorial.TargetHintMove;
 
             NavigateToScreen(ScreenState.PlayArena);
         }
@@ -1239,10 +1265,10 @@ namespace FractalTicTacToe.Maui
         private void StartBotMatchWithoutClock(BotDifficulty difficulty)
         {
             TriggerSubtleHaptic();
+            ExitTutorialMode();
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _selectedBotDifficulty = difficulty;
             _isOnlineMode = false;
-            _isTutorialMode = false;
             _currentHintMove = null;
 
             _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador";
@@ -1255,6 +1281,7 @@ namespace FractalTicTacToe.Maui
         private async void OnTimeControlCardSelected(int timeIndex)
         {
             TriggerSubtleHaptic();
+            ExitTutorialMode();
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _timeControlIndex = timeIndex;
             TimeControlConfig selectedTime = TimeControls[_timeControlIndex];
@@ -1263,7 +1290,6 @@ namespace FractalTicTacToe.Maui
             if (_selectedOpponentType == LobbyOpponentType.LocalPassAndPlay)
             {
                 _isOnlineMode = false;
-                _isTutorialMode = false;
                 _localSession.ProfileX.Username = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Jugador 1";
                 _localSession.SetTimeControl(selectedTime);
                 _localSession.ConfigureSession(SessionMode.PassAndPlay2P, _selectedBotDifficulty, _localSession.ProfileX);
@@ -1272,7 +1298,6 @@ namespace FractalTicTacToe.Maui
             }
 
             _isOnlineMode = true;
-            _isTutorialMode = false;
             _queueElapsedSeconds = 0.0;
 
             try
@@ -1301,6 +1326,7 @@ namespace FractalTicTacToe.Maui
         private async void OnCreatePrivateRoomClicked()
         {
             TriggerSubtleHaptic();
+            ExitTutorialMode();
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             TimeControlConfig selectedTime = TimeControls[_timeControlIndex];
             _isOnlineMode = true;
@@ -1338,6 +1364,7 @@ namespace FractalTicTacToe.Maui
             }
 
             TriggerSubtleHaptic();
+            ExitTutorialMode();
             if (_lobbyNoticeLabel != null) _lobbyNoticeLabel.IsVisible = false;
             _isOnlineMode = true;
 
@@ -1395,6 +1422,7 @@ namespace FractalTicTacToe.Maui
             Dispatcher.Dispatch(() =>
             {
                 TriggerSubtleHaptic();
+                ExitTutorialMode();
                 _isOnlineMode = true;
                 _currentHintMove = null;
                 UpdateLobbyModeVisibility();
@@ -1767,6 +1795,7 @@ namespace FractalTicTacToe.Maui
                 {
                     new ColumnDefinition { Width = GridLength.Star },
                     new ColumnDefinition { Width = GridLength.Auto },
+                    new ColumnDefinition { Width = GridLength.Auto },
                     new ColumnDefinition { Width = GridLength.Auto }
                 },
                 ColumnSpacing = 6
@@ -1781,11 +1810,13 @@ namespace FractalTicTacToe.Maui
                 VerticalOptions = LayoutOptions.Center
             };
 
+            var logsBtn = CreateActionButton("Logs", OnShowSystemLogsClicked, height: 34, fontSize: 11);
             var privacyBtn = CreateActionButton("Privacidad", OnShowPrivacyPolicyClicked, height: 34, fontSize: 11);
             var logoutBtn = CreateActionButton("Salir", OnLogoutPressed, height: 34, fontSize: 11);
             headerRow.Add(_profileNameLabel, 0, 0);
-            headerRow.Add(privacyBtn, 1, 0);
-            headerRow.Add(logoutBtn, 2, 0);
+            headerRow.Add(logsBtn, 1, 0);
+            headerRow.Add(privacyBtn, 2, 0);
+            headerRow.Add(logoutBtn, 3, 0);
 
             _profileRatingBigLabel = new Label
             {
@@ -1961,16 +1992,9 @@ namespace FractalTicTacToe.Maui
 
         private async void OnCellTapped(int boardIndex, int cellIndex)
         {
-            if (_isTutorialMode)
-            {
-                HandleTutorialCellTapped(boardIndex, cellIndex);
-                return;
-            }
-
-            _currentHintMove = null;
-
             if (_isOnlineMode)
             {
+                _currentHintMove = null;
                 if (!_onlineClient.IsConnected)
                 {
                     _onlineClient.HandleUnexpectedServerDisconnect();
@@ -1982,6 +2006,14 @@ namespace FractalTicTacToe.Maui
                 }
                 return;
             }
+
+            if (_tutorial.IsActive)
+            {
+                HandleTutorialCellTapped(boardIndex, cellIndex);
+                return;
+            }
+
+            _currentHintMove = null;
 
             if (!_localSession.TryPlayHumanMove(boardIndex, cellIndex))
             {
@@ -2051,63 +2083,29 @@ namespace FractalTicTacToe.Maui
                 return;
             }
 
+            ExitTutorialMode();
             NavigateToScreen(ScreenState.HomeLobby);
         }
 
         private void HandleTutorialCellTapped(int boardIndex, int cellIndex)
         {
-            if (_tutorialStep == 1)
-            {
-                if (boardIndex != 4 || cellIndex != 0)
-                {
-                    _telemetryLabel.Text = "Paso 1: Toca la casilla con borde morado (Gato central, esquina superior izquierda).";
-                    return;
-                }
+            bool accepted = _tutorial.TryHandleCellTap(boardIndex, cellIndex, out bool wonTutorial);
+            _currentHintMove = _tutorial.TargetHintMove;
 
-                _localSession.State.MakeMove(new Move(4, 0));
-                _localSession.State.MakeMove(new Move(0, 4));
-                _tutorialStep = 2;
-                _currentHintMove = new Move(4, 1);
-                TriggerSubtleHaptic();
-                PlayMobileSoundEffect(GameSoundEffect.MoveTap);
-                RefreshUI();
-            }
-            else if (_tutorialStep == 2)
+            if (!accepted)
             {
-                if (boardIndex != 4 || cellIndex != 1)
-                {
-                    _telemetryLabel.Text = "Paso 2: Toca la casilla con borde morado (Gato central, arriba al centro).";
-                    return;
-                }
-
-                _localSession.State.MakeMove(new Move(4, 1));
-                _localSession.State.MakeMove(new Move(1, 4));
-                _tutorialStep = 3;
-                _currentHintMove = new Move(4, 2);
-                TriggerSubtleHaptic();
-                PlayMobileSoundEffect(GameSoundEffect.MoveTap);
-                RefreshUI();
+                _telemetryLabel.Text = _tutorial.DetailText;
+                return;
             }
-            else if (_tutorialStep == 3)
-            {
-                if (boardIndex != 4 || cellIndex != 2)
-                {
-                    _telemetryLabel.Text = "Paso 3: Toca la casilla con borde morado (Gato central, esquina superior derecha) para ganar.";
-                    return;
-                }
 
-                _localSession.State.MakeMove(new Move(4, 2));
-                _tutorialStep = 4;
-                _currentHintMove = null;
-                TriggerSubtleHaptic();
-                PlayMobileSoundEffect(GameSoundEffect.SuddenDeathVictory);
-                RefreshUI();
-            }
+            TriggerSubtleHaptic();
+            PlayMobileSoundEffect(wonTutorial ? GameSoundEffect.SuddenDeathVictory : GameSoundEffect.MoveTap);
+            RefreshUI();
         }
 
         private void OnRematchPressed()
         {
-            if (_isTutorialMode)
+            if (_tutorial.IsActive)
             {
                 StartInteractiveTutorial();
                 return;
@@ -2378,6 +2376,16 @@ namespace FractalTicTacToe.Maui
 
             if (!state.IsGameOver)
             {
+                if (_onlineClient.Clock.IsWaitingForFirstMove)
+                {
+                    int secsLeft = (int)Math.Ceiling(_onlineClient.Clock.FirstMoveSecondsRemaining);
+                    _telemetryLabel.Text = $"{secsLeft}s para hacer el primer tiro";
+                }
+                else if (!_onlineClient.IsWaitingForOpponentTakebackResponse)
+                {
+                    _telemetryLabel.Text = string.Empty;
+                }
+
                 _undoButton.Text = "Deshacer";
                 _undoButton.IsEnabled = _onlineClient.IsInActiveMatch &&
                                         state.CanUndo &&
@@ -2419,11 +2427,11 @@ namespace FractalTicTacToe.Maui
 
         private void RefreshLocalArenaUI()
         {
-            GameState state = _localSession.State;
-            Move? lastMove = state.GetLastMove();
-
-            if (_isTutorialMode)
+            if (_tutorial.IsActive)
             {
+                GameState tutorialState = _tutorial.BoardState;
+                Move? tutorialLastMove = tutorialState.GetLastMove();
+
                 _leftPlayerCard.Stroke = new SolidColorBrush(PlayerXColor);
                 _rightPlayerCard.Stroke = new SolidColorBrush(PlayerOColor);
 
@@ -2434,48 +2442,27 @@ namespace FractalTicTacToe.Maui
 
                 _rightPlayerTitleLabel.Text = "[O] Guía";
                 _rightPlayerTitleLabel.TextColor = PlayerOColor;
-                _rightPlayerRatingLabel.Text = _tutorialStep <= 3 ? $"Paso {_tutorialStep} de 3" : "Completado";
+                _rightPlayerRatingLabel.Text = _tutorial.ProgressLabel;
                 _rightPlayerRatingLabel.TextColor = ActiveMacroBorderColor;
 
                 _leftClockLabel.IsVisible = false;
                 _rightClockLabel.IsVisible = false;
 
-                if (_tutorialStep == 1)
-                {
-                    _currentHintMove = new Move(4, 0);
-                    _statusBannerLabel.Text = "PASO 1/3: Tu casilla envía al rival al siguiente gato";
-                    _telemetryLabel.Text = "Toca la casilla morada (Gato central, esquina superior izquierda) para enviar al rival al gato de arriba a la izquierda.";
-                }
-                else if (_tutorialStep == 2)
-                {
-                    _currentHintMove = new Move(4, 1);
-                    _statusBannerLabel.Text = "PASO 2/3: Arma tu ataque y redirige al rival";
-                    _telemetryLabel.Text = "El rival tiró en su centro y te regresó al gato central. Toca la casilla morada (arriba al centro) para armar 2 en línea.";
-                }
-                else if (_tutorialStep == 3)
-                {
-                    _currentHintMove = new Move(4, 2);
-                    _statusBannerLabel.Text = "PASO 3/3: ¡Muerte Súbita! Gana con 3 en línea";
-                    _telemetryLabel.Text = "¡El rival cometió el error de regresarte al gato central! Toca la casilla morada para completar 3 en línea y ganar.";
-                }
-                else
-                {
-                    _currentHintMove = null;
-                    _statusBannerLabel.Text = "¡Tutorial completado! Ya dominas Gatote";
-                    _telemetryLabel.Text = "Regla clave: Nunca envíes al rival a un gato donde ya tenga 2 en línea listos para ganar.";
-                }
+                _currentHintMove = _tutorial.TargetHintMove;
+                _statusBannerLabel.Text = _tutorial.BannerText;
+                _telemetryLabel.Text = _tutorial.DetailText;
 
-                RenderBoardOnGrid(state, lastMove, !state.IsGameOver, _macroBoardBorders, _cellButtons);
+                RenderBoardOnGrid(tutorialState, tutorialLastMove, !tutorialState.IsGameOver, _macroBoardBorders, _cellButtons);
 
-                _inGameActionsRow.IsVisible = !state.IsGameOver;
-                _postGameActionsRow.IsVisible = state.IsGameOver;
+                _inGameActionsRow.IsVisible = !tutorialState.IsGameOver;
+                _postGameActionsRow.IsVisible = tutorialState.IsGameOver;
 
-                if (!state.IsGameOver)
+                if (!tutorialState.IsGameOver)
                 {
                     _undoButton.IsVisible = false;
                     _redoButton.IsVisible = false;
                     _hintButton.IsVisible = false;
-                    _resignOrLeaveButton.Text = "Salir del tutorial";
+                    _resignOrLeaveButton.Text = "Salir";
                     _resignOrLeaveButton.IsEnabled = true;
                 }
                 else
@@ -2486,6 +2473,9 @@ namespace FractalTicTacToe.Maui
                 }
                 return;
             }
+
+            GameState state = _localSession.State;
+            Move? lastMove = state.GetLastMove();
 
             _undoButton.IsVisible = true;
 
@@ -2694,10 +2684,19 @@ namespace FractalTicTacToe.Maui
             _leftClockLabel.Text = MatchClock.FormatClock(mySeconds);
             _rightClockLabel.Text = MatchClock.FormatClock(oppSeconds);
 
-            if (_isOnlineMode && !state.IsGameOver && clock.IsWaitingForFirstMove)
+            if (_isOnlineMode && !state.IsGameOver)
             {
-                int secsLeft = (int)Math.Ceiling(clock.FirstMoveSecondsRemaining);
-                _telemetryLabel.Text = $"{secsLeft}s para hacer el primer tiro";
+                if (clock.IsWaitingForFirstMove)
+                {
+                    int secsLeft = (int)Math.Ceiling(clock.FirstMoveSecondsRemaining);
+                    _telemetryLabel.Text = $"{secsLeft}s para hacer el primer tiro";
+                }
+                else if (!_onlineClient.IsWaitingForOpponentTakebackResponse &&
+                         _telemetryLabel.Text != null &&
+                         _telemetryLabel.Text.EndsWith("para hacer el primer tiro", StringComparison.Ordinal))
+                {
+                    _telemetryLabel.Text = string.Empty;
+                }
             }
 
             bool myClockActive = !state.IsGameOver && !clock.IsWaitingForFirstMove && state.CurrentPlayer == myRole;

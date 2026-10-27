@@ -36,8 +36,10 @@ namespace CoreTests
             RunTest("22. Minimax: Redirección Multi-Tablero, Auto-Redirección y Trampas", TestMinimaxMultiBoardRedirectionLookaheadAndTraps);
             RunTest("23. Clasificación Humana de Jugadas en Sala de Análisis", TestHumanReadableMoveQualityAndAnalysisLabels);
             RunTest("24. Caída de Servidor sin Congelamiento y Salas Privadas por Código", TestServerCrashGracefulCancelAndPrivateRoomCode);
+            RunTest("25. Tutorial Interactivo Aislado, Salida a Sala Online y GameLogger", TestInteractiveTutorialExitToOnlineAndLoggingSystem);
+            RunTest("26. Reconexión Móvil de 20s (RESUME) y Limpieza de Reloj Inicial", TestMobileSessionGracePeriodResumeAndFirstMoveCountdownCleanup);
 
-            Console.WriteLine("\n✔ ¡Las 24 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
+            Console.WriteLine("\n✔ ¡Las 26 suites de pruebas unitarias y de integración pasaron exitosamente (100% PASS)!");
             return 0;
         }
 
@@ -776,6 +778,154 @@ namespace CoreTests
                 client.ProcessServerPacket(MultiplayerProtocol.BuildSessionResumed(room, Player.X));
                 Assert(resumedRoomId == room.RoomId && client.IsInActiveMatch, "El cliente debe restaurar la partida activa al recibir SESSION_RESUMED.");
                 Assert(client.State.MoveCount == 1 && client.State.GetLastMove() == new Move(4, 4), "El estado del tablero debe restaurar el movimiento (4,4).");
+            }
+        }
+
+        private static void TestInteractiveTutorialExitToOnlineAndLoggingSystem()
+        {
+            // 1. Probar flujo completo de 3 pasos del Tutorial Interactivo
+            var tutorial = new InteractiveTutorialController();
+            var localSession = new GameSessionController(SessionMode.HumanVsBotX, BotDifficulty.Hard);
+
+            tutorial.Start();
+            Assert(tutorial.IsActive && tutorial.CurrentStep == 1, "El tutorial debe iniciar activo en el Paso 1.");
+            Assert(tutorial.TargetHintMove == new Move(4, 0), "La pista del Paso 1 debe ser (4, 0).");
+            Assert(localSession.State.MoveCount == 0, "El tutorial jamás debe modificar el estado de la sesión local.");
+
+            // Intentar tocar una casilla incorrecta en Paso 1
+            bool wrongStep1 = tutorial.TryHandleCellTap(0, 0, out bool won1);
+            Assert(!wrongStep1 && !won1 && tutorial.CurrentStep == 1, "Tocar (0,0) en Paso 1 debe ser rechazado y mantener Paso 1.");
+
+            // Tocar casilla correcta en Paso 1: (4, 0) -> la guía responde automáticamente con (0, 4)
+            bool okStep1 = tutorial.TryHandleCellTap(4, 0, out won1);
+            Assert(okStep1 && !won1 && tutorial.CurrentStep == 2, "Tocar (4,0) debe avanzar al Paso 2.");
+            Assert(tutorial.BoardState.MoveCount == 2, "El tablero del tutorial debe tener 2 movimientos tras la respuesta de la guía.");
+            Assert(tutorial.TargetHintMove == new Move(4, 1), "La pista del Paso 2 debe ser (4, 1).");
+
+            // Tocar casilla correcta en Paso 2: (4, 1) -> la guía responde con (1, 4)
+            bool okStep2 = tutorial.TryHandleCellTap(4, 1, out bool won2);
+            Assert(okStep2 && !won2 && tutorial.CurrentStep == 3, "Tocar (4,1) debe avanzar al Paso 3.");
+            Assert(tutorial.TargetHintMove == new Move(4, 2), "La pista del Paso 3 debe ser (4, 2).");
+
+            // Tocar casilla ganadora en Paso 3: (4, 2) -> Muerte Súbita
+            bool okStep3 = tutorial.TryHandleCellTap(4, 2, out bool won3);
+            Assert(okStep3 && won3 && tutorial.CurrentStep == 4, "Tocar (4,2) debe completar el tutorial con victoria.");
+            Assert(tutorial.BoardState.IsGameOver && tutorial.BoardState.Winner == Player.X, "El tablero del tutorial debe declarar ganador a X.");
+
+            // 2. REGRESIÓN CRÍTICA: Entrar al tutorial -> Dar clic en "Salir" -> Crear Sala Privada Online -> Hacer primer movimiento
+            tutorial.Start();
+            tutorial.TryHandleCellTap(4, 0, out _); // Hace un paso en el tutorial
+            Assert(tutorial.IsActive && tutorial.BoardState.MoveCount == 2, "Tutorial a mitad de progreso.");
+
+            // El usuario presiona el botón "Salir"
+            tutorial.Exit();
+            Assert(!tutorial.IsActive && tutorial.CurrentStep == 0, "Al salir del tutorial, IsActive debe ser false y CurrentStep 0.");
+            Assert(!tutorial.TargetHintMove.HasValue, "Al salir del tutorial, TargetHintMove debe limpiarse a null.");
+            Assert(tutorial.BoardState.MoveCount == 0, "Al salir del tutorial, su tablero interno debe reiniciarse.");
+            Assert(!tutorial.TryHandleCellTap(4, 1, out _), "Un tutorial inactivo jamás debe interceptar clics.");
+
+            // Ahora el usuario crea una sala privada en línea y hace el primer movimiento (por ejemplo en (2, 7))
+            var mm = new MatchmakingService();
+            mm.RegisterAccount("AnaTutorial", "pass123", out PlayerProfile ana, out _);
+            mm.RegisterAccount("BetoRival", "pass123", out PlayerProfile beto, out _);
+            string inviteCode = mm.CreatePrivateLobby(ana.PlayerId, TimeControlConfig.Blitz3Plus2);
+            OnlineMatchRoom privateRoom = mm.JoinPrivateLobby(beto.PlayerId, inviteCode, out _);
+
+            using (var client = new OnlineMultiplayerClient())
+            {
+                client.ProcessServerPacket(MultiplayerProtocol.BuildAuthOk(ana));
+                client.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(privateRoom, Player.X));
+
+                Assert(client.IsInActiveMatch && client.State.MoveCount == 0, "La sala privada debe iniciar limpia con 0 movimientos.");
+                Assert(client.Clock.IsWaitingForFirstMove, "Antes del primer movimiento debe estar activo el contador de 30s.");
+
+                // Primer movimiento libre en cualquier casilla (p. ej. sub-tablero 2, casilla 7) sin interferencia del tutorial
+                bool firstMoveAccepted = privateRoom.SubmitMove(ana.PlayerId, new Move(2, 7), out string moveErr);
+                Assert(firstMoveAccepted && string.IsNullOrEmpty(moveErr), $"El primer movimiento en sala privada debe ejecutarse sin interferencia ({moveErr}).");
+
+                client.ProcessServerPacket(MultiplayerProtocol.BuildStateSync(privateRoom, new Move(2, 7)));
+                Assert(client.State.MoveCount == 1, "El estado del cliente online debe registrar exactamente el primer movimiento.");
+                Assert(client.State.GetCell(2, 7) == Player.X, "La casilla (2,7) debe pertenecer a X.");
+                Assert(client.State.GetCell(4, 0) == Player.None, "El tablero online NO debe tener residuos de la jugada (4,0) del tutorial.");
+                Assert(!client.Clock.IsWaitingForFirstMove, "Una vez hecho el primer movimiento, IsWaitingForFirstMove debe ser false para ocultar el texto de 30s.");
+            }
+
+            // 3. Probar Sistema de Log Estructurado (GameLogger) en memoria y disco
+            string tempLogFile = Path.Combine(Path.GetTempPath(), $"gatote_test_{Guid.NewGuid():N}.log");
+            try
+            {
+                GameLogger.Clear();
+                GameLogger.ConfigureFileSink(tempLogFile);
+                GameLogger.Info("TestSuite", "Evento informativo de prueba");
+                GameLogger.Warning("TestSuite", "Advertencia de prueba");
+                GameLogger.Error("TestSuite", "Error simulado de prueba");
+
+                var entries = GameLogger.GetRecentEntries(10);
+                Assert(entries.Count >= 3, $"GameLogger debe almacenar las entradas en memoria (encontradas: {entries.Count}).");
+
+                string exported = GameLogger.ExportFormattedText(10);
+                Assert(exported.Contains("Evento informativo de prueba") && exported.Contains("Error simulado de prueba"),
+                    "ExportFormattedText debe incluir los mensajes registrados.");
+                Assert(File.Exists(tempLogFile), "GameLogger debe persistir el archivo de log en disco.");
+                string diskContent = File.ReadAllText(tempLogFile);
+                Assert(diskContent.Contains("Advertencia de prueba"), "El archivo de log en disco debe contener las entradas escritas.");
+            }
+            finally
+            {
+                GameLogger.ConfigureFileSink(null);
+                if (File.Exists(tempLogFile))
+                {
+                    File.Delete(tempLogFile);
+                }
+            }
+        }
+
+        private static void TestMobileSessionGracePeriodResumeAndFirstMoveCountdownCleanup()
+        {
+            var mm = new MatchmakingService();
+            mm.RegisterAccount("PlayerMovilX", "pass123", out PlayerProfile px, out _);
+            mm.RegisterAccount("PlayerMovilO", "pass123", out PlayerProfile po, out _);
+
+            string code = mm.CreatePrivateLobby(px.PlayerId, TimeControlConfig.Blitz3Plus0);
+            OnlineMatchRoom room = mm.JoinPrivateLobby(po.PlayerId, code, out _);
+
+            using (var client = new OnlineMultiplayerClient())
+            {
+                client.ProcessServerPacket(MultiplayerProtocol.BuildAuthOk(px));
+                client.ProcessServerPacket(MultiplayerProtocol.BuildMatchStart(room, Player.X));
+
+                // Al iniciar la partida en línea, IsWaitingForFirstMove es true (cuenta regresiva de 30s activa)
+                Assert(client.Clock.IsWaitingForFirstMove, "Al iniciar la partida en línea, IsWaitingForFirstMove debe ser true.");
+                client.TickClock(4.0);
+                Assert(client.Clock.IsWaitingForFirstMove && client.Clock.FirstMoveSecondsRemaining < 30.0,
+                    "Durante la espera del primer tiro, sólo disminuye FirstMoveSecondsRemaining.");
+                Assert(Math.Abs(client.Clock.RemainingSecondsX - 180.0) < 0.01,
+                    "El reloj principal de X (3 min) no debe disminuir antes del primer tiro.");
+
+                // En cuanto se realiza el primer movimiento (MoveCount == 1), IsWaitingForFirstMove pasa a false inmediatamente
+                Assert(room.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento (4,4) válido.");
+                client.ProcessServerPacket(MultiplayerProtocol.BuildStateSync(room, new Move(4, 4)));
+                Assert(!client.Clock.IsWaitingForFirstMove,
+                    "Tras el primer movimiento, IsWaitingForFirstMove debe ser false inmediatamente para ocultar el aviso de 30s.");
+
+                // Probar protocolo de reconexión móvil (RESUME -> SESSION_RESUMED)
+                string resumePacket = MultiplayerProtocol.BuildResume(px.Username, "pass123", room.RoomId);
+                Assert(resumePacket == $"RESUME|{px.Username}|pass123|{room.RoomId}",
+                    $"El paquete RESUME debe tener formato RESUME|usuario|password|roomId, fue '{resumePacket}'.");
+
+                // Segundo movimiento de O en el servidor mientras X reconecta
+                Assert(room.SubmitMove(po.PlayerId, new Move(4, 0), out _), "Segundo movimiento (4,0) válido.");
+
+                string resumedRoomId = null;
+                client.SessionResumed += rId => resumedRoomId = rId;
+                client.ProcessServerPacket(MultiplayerProtocol.BuildSessionResumed(room, Player.X));
+
+                Assert(resumedRoomId == room.RoomId && client.IsInActiveMatch,
+                    "Al recibir SESSION_RESUMED, el cliente debe restaurar la partida activa.");
+                Assert(client.State.MoveCount == 2 && client.State.GetLastMove() == new Move(4, 0),
+                    "El cliente reconectado debe sincronizar los 2 movimientos y el último tiro (4,0).");
+                Assert(!client.Clock.IsWaitingForFirstMove,
+                    "Una partida reanudada con jugadas (MoveCount > 0) jamás debe mostrar la cuenta regresiva de 30s.");
             }
         }
 
