@@ -73,7 +73,9 @@ namespace FractalTicTacToe.Core
         public string LocalUsername { get; private set; }
         public int LocalElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
         public int LocalBulletElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
-        public int LocalBlitzElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public int LocalBlitz3Plus0Elo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public int LocalBlitz3Plus2Elo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
+        public int LocalBlitzElo => LocalBlitz3Plus2Elo;
         public int LocalRapidElo { get; private set; } = EloRatingCalculator.DefaultInitialRating;
         public string LocalRankTitle { get; private set; } = "Plata";
         public int LocalWins { get; private set; }
@@ -85,7 +87,8 @@ namespace FractalTicTacToe.Core
             switch (timeControl.Category)
             {
                 case TimeControlCategory.Bullet: return LocalBulletElo;
-                case TimeControlCategory.Blitz: return LocalBlitzElo;
+                case TimeControlCategory.Blitz3Plus0: return LocalBlitz3Plus0Elo;
+                case TimeControlCategory.Blitz3Plus2: return LocalBlitz3Plus2Elo;
                 case TimeControlCategory.Rapid: return LocalRapidElo;
                 default: return LocalElo;
             }
@@ -98,14 +101,35 @@ namespace FractalTicTacToe.Core
                 case TimeControlCategory.Bullet:
                     LocalBulletElo = newRating;
                     break;
-                case TimeControlCategory.Blitz:
-                    LocalBlitzElo = newRating;
+                case TimeControlCategory.Blitz3Plus0:
+                    LocalBlitz3Plus0Elo = newRating;
+                    break;
+                case TimeControlCategory.Blitz3Plus2:
+                    LocalBlitz3Plus2Elo = newRating;
                     break;
                 case TimeControlCategory.Rapid:
                     LocalRapidElo = newRating;
                     break;
             }
             LocalElo = newRating;
+        }
+
+        /// <summary>
+        /// Reinicia por completo las estadísticas y puntuaciones en memoria al cerrar sesión o entrar en Modo Invitado.
+        /// </summary>
+        public void ResetLocalProfile(string guestUsername = "Invitado")
+        {
+            LocalPlayerId = null;
+            LocalUsername = string.IsNullOrWhiteSpace(guestUsername) ? "Invitado" : guestUsername.Trim();
+            LocalElo = EloRatingCalculator.DefaultInitialRating;
+            LocalBulletElo = EloRatingCalculator.DefaultInitialRating;
+            LocalBlitz3Plus0Elo = EloRatingCalculator.DefaultInitialRating;
+            LocalBlitz3Plus2Elo = EloRatingCalculator.DefaultInitialRating;
+            LocalRapidElo = EloRatingCalculator.DefaultInitialRating;
+            LocalWins = 0;
+            LocalLosses = 0;
+            LocalDraws = 0;
+            LocalRankTitle = EloRatingCalculator.GetRankTitle(LocalElo);
         }
 
         /// <summary>
@@ -120,7 +144,8 @@ namespace FractalTicTacToe.Core
             int rapidElo,
             int wins,
             int losses,
-            int draws)
+            int draws,
+            int blitz3Plus0Elo = 0)
         {
             if (!string.IsNullOrWhiteSpace(username))
             {
@@ -128,7 +153,8 @@ namespace FractalTicTacToe.Core
             }
             LocalElo = elo > 0 ? elo : EloRatingCalculator.DefaultInitialRating;
             LocalBulletElo = bulletElo > 0 ? bulletElo : LocalElo;
-            LocalBlitzElo = blitzElo > 0 ? blitzElo : LocalElo;
+            LocalBlitz3Plus2Elo = blitzElo > 0 ? blitzElo : LocalElo;
+            LocalBlitz3Plus0Elo = blitz3Plus0Elo > 0 ? blitz3Plus0Elo : LocalBlitz3Plus2Elo;
             LocalRapidElo = rapidElo > 0 ? rapidElo : LocalElo;
             LocalWins = Math.Max(0, wins);
             LocalLosses = Math.Max(0, losses);
@@ -292,6 +318,7 @@ namespace FractalTicTacToe.Core
         public event Action<Player, MatchEndReason, EloMatchUpdate> MatchEnded;
         public event Action<string[]> LeaderboardReceived;
         public event Action<string[]> HistoryReceived;
+        public event Action<MatchRecord> HistoricalMatchSynced;
         public event Action<string> AccountDeleted;
         public event Action<string> ErrorReceived;
         public event Action<string> ServerConnectionLost;
@@ -1030,7 +1057,7 @@ namespace FractalTicTacToe.Core
             switch (evt)
             {
                 case MultiplayerProtocol.EvtAuthOk:
-                    // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>|<bulletElo>|<blitzElo>|<rapidElo>
+                    // AUTH_OK|<playerId>|<username>|<elo>|<rank>|<wins>|<losses>|<draws>|<bulletElo>|<blitz3Plus2Elo>|<rapidElo>|<blitz3Plus0Elo>
                     if (parts.Length >= 5)
                     {
                         LocalPlayerId = parts[1];
@@ -1039,7 +1066,8 @@ namespace FractalTicTacToe.Core
                         {
                             LocalElo = elo;
                             LocalBulletElo = elo;
-                            LocalBlitzElo = elo;
+                            LocalBlitz3Plus0Elo = elo;
+                            LocalBlitz3Plus2Elo = elo;
                             LocalRapidElo = elo;
                         }
                         LocalRankTitle = parts[4];
@@ -1052,8 +1080,16 @@ namespace FractalTicTacToe.Core
                         if (parts.Length >= 11)
                         {
                             if (int.TryParse(parts[8], out int bElo)) LocalBulletElo = bElo;
-                            if (int.TryParse(parts[9], out int zElo)) LocalBlitzElo = zElo;
+                            if (int.TryParse(parts[9], out int zElo))
+                            {
+                                LocalBlitz3Plus2Elo = zElo;
+                                LocalBlitz3Plus0Elo = zElo;
+                            }
                             if (int.TryParse(parts[10], out int rElo)) LocalRapidElo = rElo;
+                        }
+                        if (parts.Length >= 12 && int.TryParse(parts[11], out int z0Elo))
+                        {
+                            LocalBlitz3Plus0Elo = z0Elo;
                         }
                         Authenticated?.Invoke(LocalUsername, LocalElo, LocalRankTitle);
 
@@ -1411,12 +1447,42 @@ namespace FractalTicTacToe.Core
                 case MultiplayerProtocol.EvtAccountDeleted:
                     // ACCOUNT_DELETED|<username>
                     string deletedUser = parts.Length >= 2 ? parts[1] : LocalUsername;
-                    LocalPlayerId = null;
-                    LocalUsername = null;
+                    ResetLocalProfile("Invitado");
                     IsInQueue = false;
                     ActiveRoomId = null;
                     AccountDeleted?.Invoke(deletedUser ?? string.Empty);
                     StateChanged?.Invoke();
+                    break;
+
+                case MultiplayerProtocol.EvtMatchRecordSync:
+                    // MATCH_RECORD_SYNC|<matchId>|<dateUtc>|<userX>|<userO>|<eloXBefore>|<eloXAfter>|<eloOBefore>|<eloOAfter>|<winner>|<endReason>|<fen>|<moves>
+                    if (parts.Length >= 13)
+                    {
+                        DateTime.TryParse(parts[2], System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime playedUtc);
+                        int.TryParse(parts[5], out int eloXBefore);
+                        int.TryParse(parts[6], out int eloXAfter);
+                        int.TryParse(parts[7], out int eloOBefore);
+                        int.TryParse(parts[8], out int eloOAfter);
+                        Enum.TryParse(parts[9], ignoreCase: true, out Player syncWinner);
+                        Enum.TryParse(parts[10], ignoreCase: true, out MatchEndReason syncReason);
+
+                        var syncedRecord = new MatchRecord
+                        {
+                            MatchId = parts[1],
+                            PlayedAtUtc = playedUtc == default ? DateTime.UtcNow : playedUtc,
+                            PlayerXName = parts[3],
+                            PlayerOName = parts[4],
+                            PlayerXEloBefore = eloXBefore,
+                            PlayerXEloAfter = eloXAfter,
+                            PlayerOEloBefore = eloOBefore,
+                            PlayerOEloAfter = eloOAfter,
+                            Winner = syncWinner,
+                            EndReason = syncReason,
+                            FinalFen = parts[11],
+                            MoveTranscript = parts[12]
+                        };
+                        HistoricalMatchSynced?.Invoke(syncedRecord);
+                    }
                     break;
 
                 case "LEADERBOARD":

@@ -135,6 +135,9 @@ namespace FractalTicTacToe.Maui
         // Pantalla 0: Login y Registro
         private Entry _authUsernameInput;
         private Entry _authPasswordInput;
+        private Entry _authConfirmPasswordInput;
+        private Button _togglePasswordVisibilityBtn;
+        private bool _isPasswordVisible;
         private Label _authFeedbackLabel;
         private Button _loginBtn;
         private Button _registerBtn;
@@ -208,7 +211,12 @@ namespace FractalTicTacToe.Maui
         private Label _profileNameLabel;
         private Label _profileRatingBigLabel;
         private Label _profileStatsGridLabel;
+        private Button _deleteAccountBtn;
         private VerticalStackLayout _leaderboardListContainer;
+
+        private bool IsGuestUser =>
+            string.IsNullOrWhiteSpace(_authenticatedUsername) ||
+            string.Equals(_authenticatedUsername, "Invitado", StringComparison.OrdinalIgnoreCase);
 
         public MainPage()
         {
@@ -234,6 +242,7 @@ namespace FractalTicTacToe.Maui
             _onlineClient.MatchStarted += OnOnlineMatchStarted;
             _onlineClient.SessionResumed += OnOnlineSessionResumed;
             _onlineClient.MatchEnded += OnOnlineMatchEnded;
+            _onlineClient.HistoricalMatchSynced += OnOnlineHistoricalMatchSynced;
             _onlineClient.ErrorReceived += OnOnlineErrorReceived;
             _onlineClient.ServerConnectionLost += OnOnlineServerConnectionLost;
             _onlineClient.LeaderboardReceived += OnLeaderboardReceived;
@@ -267,11 +276,12 @@ namespace FractalTicTacToe.Maui
                             localProf.Username,
                             localProf.EloRating,
                             localProf.BulletElo,
-                            localProf.BlitzElo,
+                            localProf.Blitz3Plus2Elo,
                             localProf.RapidElo,
                             localProf.Wins,
                             localProf.Losses,
-                            localProf.Draws);
+                            localProf.Draws,
+                            localProf.Blitz3Plus0Elo);
                     }
                 }
 
@@ -334,12 +344,12 @@ namespace FractalTicTacToe.Maui
                     if (!string.IsNullOrEmpty(_onlineClient.PendingInviteCode) && _onlineClient.PendingInviteCode != "...")
                     {
                         _matchmakingLoadingTimerLabel.Text =
-                            $"Comparte el código {_onlineClient.PendingInviteCode} con tu amigo ({secs / 60:D2}:{secs % 60:D2})";
+                            $"Comparte el código {_onlineClient.PendingInviteCode} con tu amigo • {secs / 60:D2}:{secs % 60:D2}";
                     }
                     else
                     {
                         _matchmakingLoadingTimerLabel.Text =
-                            $"Esperando rival ({secs / 60:D2}:{secs % 60:D2}) • Modo {_onlineClient.Clock.Config.Name}";
+                            $"Esperando rival • {secs / 60:D2}:{secs % 60:D2} • Modo {_onlineClient.Clock.Config.Name}";
                     }
                 }
             }
@@ -699,21 +709,56 @@ namespace FractalTicTacToe.Maui
 
             _authUsernameInput = new Entry
             {
-                Placeholder = "Usuario (mín. 3 letras)",
+                Placeholder = "Usuario de al menos 3 letras",
                 PlaceholderColor = Color.FromRgb(120, 135, 160),
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
                 HeightRequest = 44
             };
 
+            var passwordRow = new Grid
+            {
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition { Width = GridLength.Star },
+                    new ColumnDefinition { Width = GridLength.Auto }
+                },
+                ColumnSpacing = 8
+            };
+
             _authPasswordInput = new Entry
             {
-                Placeholder = "Contraseña (mín. 4 caracteres)",
+                Placeholder = "Contraseña de al menos 4 caracteres",
                 PlaceholderColor = Color.FromRgb(120, 135, 160),
                 IsPassword = true,
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
                 HeightRequest = 44
+            };
+
+            _togglePasswordVisibilityBtn = CreateActionButton("Ver", () =>
+            {
+                _isPasswordVisible = !_isPasswordVisible;
+                _authPasswordInput.IsPassword = !_isPasswordVisible;
+                if (_authConfirmPasswordInput != null)
+                {
+                    _authConfirmPasswordInput.IsPassword = !_isPasswordVisible;
+                }
+                _togglePasswordVisibilityBtn.Text = _isPasswordVisible ? "Ocultar" : "Ver";
+            }, height: 44, fontSize: 12);
+
+            passwordRow.Add(_authPasswordInput, 0, 0);
+            passwordRow.Add(_togglePasswordVisibilityBtn, 1, 0);
+
+            _authConfirmPasswordInput = new Entry
+            {
+                Placeholder = "Repite tu contraseña para registrarte",
+                PlaceholderColor = Color.FromRgb(120, 135, 160),
+                IsPassword = true,
+                TextColor = Colors.White,
+                BackgroundColor = SurfaceColor,
+                HeightRequest = 44,
+                IsVisible = false
             };
 
             _authFeedbackLabel = new Label
@@ -752,6 +797,9 @@ namespace FractalTicTacToe.Maui
 
             var guestBtn = CreateActionButton("Invitado", () =>
             {
+                ClearSavedSessionFromDisk();
+                _onlineClient.Disconnect();
+                _onlineClient.ResetLocalProfile("Invitado");
                 _authenticatedUsername = "Invitado";
                 _authenticatedPassword = string.Empty;
                 _localSession.ProfileX.Username = "Invitado";
@@ -764,7 +812,8 @@ namespace FractalTicTacToe.Maui
             extraGrid.Add(privacyBtn, 1, 0);
 
             formStack.Add(_authUsernameInput);
-            formStack.Add(_authPasswordInput);
+            formStack.Add(passwordRow);
+            formStack.Add(_authConfirmPasswordInput);
             formStack.Add(_authFeedbackLabel);
             formStack.Add(btnGrid);
             formStack.Add(extraGrid);
@@ -783,26 +832,16 @@ namespace FractalTicTacToe.Maui
                 "Cerrar");
         }
 
-        private async void OnShowSystemLogsClicked()
-        {
-            string logText = GameLogger.ExportFormattedText(30);
-            bool clear = await DisplayAlert(
-                "Registro de Eventos (Logs)",
-                logText,
-                "Limpiar",
-                "Cerrar");
-
-            if (clear)
-            {
-                GameLogger.Clear();
-                GameLogger.Info("UI.MAUI", "Registro de eventos limpiado por el usuario.");
-            }
-        }
-
         private async void OnSubmitAuthPressed(bool isRegister)
         {
             string username = _authUsernameInput.Text?.Trim() ?? string.Empty;
             string password = _authPasswordInput.Text?.Trim() ?? string.Empty;
+            string confirmPassword = _authConfirmPasswordInput?.Text?.Trim() ?? string.Empty;
+
+            if (!isRegister && _authConfirmPasswordInput != null)
+            {
+                _authConfirmPasswordInput.IsVisible = false;
+            }
 
             if (username.Length < 3)
             {
@@ -816,6 +855,25 @@ namespace FractalTicTacToe.Maui
                 _authFeedbackLabel.Text = "La contraseña debe tener al menos 4 caracteres.";
                 _authFeedbackLabel.TextColor = NegativeDeltaColor;
                 return;
+            }
+
+            if (isRegister)
+            {
+                if (_authConfirmPasswordInput != null && !_authConfirmPasswordInput.IsVisible)
+                {
+                    _authConfirmPasswordInput.IsVisible = true;
+                    _authConfirmPasswordInput.Focus();
+                    _authFeedbackLabel.Text = "Repite tu contraseña abajo para confirmar y vuelve a tocar Crear cuenta.";
+                    _authFeedbackLabel.TextColor = LastMoveHighlightColor;
+                    return;
+                }
+
+                if (!string.Equals(password, confirmPassword, StringComparison.Ordinal))
+                {
+                    _authFeedbackLabel.Text = "Las contraseñas no coinciden. Verifica que estén escritas igual.";
+                    _authFeedbackLabel.TextColor = NegativeDeltaColor;
+                    return;
+                }
             }
 
             _authenticatedPassword = password;
@@ -1076,13 +1134,13 @@ namespace FractalTicTacToe.Maui
             }
             col.Add(_quickPairingTimeGrid);
 
-            // 4B-Extra: Sala Privada con Amigo (Solo visible en modo En Línea)
+            // 4B-Extra: Sala Privada con Amigo
             _privateRoomPanel = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1, cornerRadius: 10, padding: new Thickness(10, 8));
             _privateRoomPanel.IsVisible = false;
             var privStack = new VerticalStackLayout { Spacing = 6 };
             privStack.Add(new Label
             {
-                Text = "JUGAR CON AMIGO (SALA PRIVADA)",
+                Text = "JUGAR CON AMIGO • SALA PRIVADA",
                 FontSize = 11,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = MutedTextColor,
@@ -1101,7 +1159,7 @@ namespace FractalTicTacToe.Maui
             var createPrivBtn = CreateActionButton("Crear sala", OnCreatePrivateRoomClicked, height: 38, fontSize: 12);
             _privateCodeInput = new Entry
             {
-                Placeholder = "Código (ej. A7K9)",
+                Placeholder = "Código de sala",
                 PlaceholderColor = Color.FromRgb(120, 135, 160),
                 TextColor = Colors.White,
                 BackgroundColor = SurfaceColor,
@@ -1118,13 +1176,13 @@ namespace FractalTicTacToe.Maui
             _privateRoomPanel.Content = privStack;
             col.Add(_privateRoomPanel);
 
-            // 4B-Custom: Modo Personalizado y Sin Tiempo (Solo visible en modo 2 Jugadores)
+            // 4B-Custom: Modo Personalizado y Sin Tiempo
             _customPassPlayTimePanel = CreateCardBorder(CardBgColor, InactiveMacroBorderColor, strokeThickness: 1, cornerRadius: 10, padding: new Thickness(10, 8));
             _customPassPlayTimePanel.IsVisible = false;
             var customStack = new VerticalStackLayout { Spacing = 6 };
             customStack.Add(new Label
             {
-                Text = "PERSONALIZADO O SIN TIEMPO (2 JUGADORES)",
+                Text = "PERSONALIZADO O SIN TIEMPO",
                 FontSize = 11,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = MutedTextColor,
@@ -1194,7 +1252,7 @@ namespace FractalTicTacToe.Maui
 
             _matchmakingLoadingTimerLabel = new Label
             {
-                Text = "Esperando rival (00:00)",
+                Text = "Esperando rival • 00:00",
                 FontSize = 13,
                 TextColor = Colors.White,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1272,7 +1330,7 @@ namespace FractalTicTacToe.Maui
 
             if (_selectedOpponentType == LobbyOpponentType.BotMinimax)
             {
-                _lobbySection2TitleLabel.Text = "DIFICULTAD (SIN TIEMPO)";
+                _lobbySection2TitleLabel.Text = "DIFICULTAD • SIN TIEMPO";
                 _botDifficultyGrid.IsVisible = true;
                 _quickPairingTimeGrid.IsVisible = false;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
@@ -1280,7 +1338,7 @@ namespace FractalTicTacToe.Maui
             }
             else if (_selectedOpponentType == LobbyOpponentType.OnlineMultiplayer)
             {
-                _lobbySection2TitleLabel.Text = "TIEMPO (EN LÍNEA)";
+                _lobbySection2TitleLabel.Text = "TIEMPO EN LÍNEA";
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = true;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = true;
@@ -1288,7 +1346,7 @@ namespace FractalTicTacToe.Maui
             }
             else
             {
-                _lobbySection2TitleLabel.Text = "TIEMPO (2 JUGADORES)";
+                _lobbySection2TitleLabel.Text = "TIEMPO • 2 JUGADORES";
                 _botDifficultyGrid.IsVisible = false;
                 _quickPairingTimeGrid.IsVisible = true;
                 if (_privateRoomPanel != null) _privateRoomPanel.IsVisible = false;
@@ -1408,7 +1466,7 @@ namespace FractalTicTacToe.Maui
                 }
 
                 _onlineClient.JoinMatchmakingQueue(selectedTime);
-                _matchmakingLoadingTitleLabel.Text = $"BUSCANDO RIVAL ({selectedTime.Name})";
+                _matchmakingLoadingTitleLabel.Text = $"BUSCANDO RIVAL • {selectedTime.Name}";
                 UpdateLobbyModeVisibility();
             }
             catch
@@ -1488,7 +1546,7 @@ namespace FractalTicTacToe.Maui
             Dispatcher.Dispatch(() =>
             {
                 _matchmakingLoadingTitleLabel.Text = $"CÓDIGO DE SALA: {inviteCode}";
-                _matchmakingLoadingTimerLabel.Text = $"Comparte el código {inviteCode} con tu amigo ({timeControlCode})";
+                _matchmakingLoadingTimerLabel.Text = $"Comparte el código {inviteCode} con tu amigo • {timeControlCode}";
                 UpdateLobbyModeVisibility();
             });
         }
@@ -1929,7 +1987,6 @@ namespace FractalTicTacToe.Maui
                 {
                     new ColumnDefinition { Width = GridLength.Star },
                     new ColumnDefinition { Width = GridLength.Auto },
-                    new ColumnDefinition { Width = GridLength.Auto },
                     new ColumnDefinition { Width = GridLength.Auto }
                 },
                 ColumnSpacing = 6
@@ -1944,18 +2001,16 @@ namespace FractalTicTacToe.Maui
                 VerticalOptions = LayoutOptions.Center
             };
 
-            var logsBtn = CreateActionButton("Logs", OnShowSystemLogsClicked, height: 34, fontSize: 11);
             var privacyBtn = CreateActionButton("Privacidad", OnShowPrivacyPolicyClicked, height: 34, fontSize: 11);
             var logoutBtn = CreateActionButton("Salir", OnLogoutPressed, height: 34, fontSize: 11);
             headerRow.Add(_profileNameLabel, 0, 0);
-            headerRow.Add(logsBtn, 1, 0);
-            headerRow.Add(privacyBtn, 2, 0);
-            headerRow.Add(logoutBtn, 3, 0);
+            headerRow.Add(privacyBtn, 1, 0);
+            headerRow.Add(logoutBtn, 2, 0);
 
             _profileRatingBigLabel = new Label
             {
                 Text = "1200 pts • Liga Plata",
-                FontSize = 15,
+                FontSize = 14,
                 FontAttributes = FontAttributes.Bold,
                 TextColor = ActiveMacroBorderColor,
                 HorizontalTextAlignment = TextAlignment.Center
@@ -1969,14 +2024,14 @@ namespace FractalTicTacToe.Maui
                 HorizontalTextAlignment = TextAlignment.Center
             };
 
-            var deleteAccountBtn = CreateActionButton("Eliminar cuenta", OnDeleteAccountClicked, height: 36, fontSize: 12);
-            deleteAccountBtn.BackgroundColor = Color.FromRgb(68, 28, 36);
-            deleteAccountBtn.TextColor = NegativeDeltaColor;
+            _deleteAccountBtn = CreateActionButton("Eliminar cuenta", OnDeleteAccountClicked, height: 36, fontSize: 12);
+            _deleteAccountBtn.BackgroundColor = Color.FromRgb(68, 28, 36);
+            _deleteAccountBtn.TextColor = NegativeDeltaColor;
 
             profileStack.Add(headerRow);
             profileStack.Add(_profileRatingBigLabel);
             profileStack.Add(_profileStatsGridLabel);
-            profileStack.Add(deleteAccountBtn);
+            profileStack.Add(_deleteAccountBtn);
             profileCard.Content = profileStack;
             col.Add(profileCard);
 
@@ -1998,7 +2053,7 @@ namespace FractalTicTacToe.Maui
                 "Diamante — 1700 a 1899 pts",
                 "Platino — 1500 a 1699 pts",
                 "Oro — 1300 a 1499 pts",
-                "Plata (Inicial) — 1100 a 1299 pts",
+                "Plata — 1100 a 1299 pts",
                 "Bronce — 100 a 1099 pts"
             };
 
@@ -2054,16 +2109,28 @@ namespace FractalTicTacToe.Maui
         {
             ClearSavedSessionFromDisk();
             _onlineClient.Disconnect();
+            _onlineClient.ResetLocalProfile("Invitado");
             _authenticatedUsername = string.Empty;
             _authenticatedPassword = string.Empty;
+            _localSession.ProfileX.Username = "Invitado";
             if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
+            if (_authConfirmPasswordInput != null)
+            {
+                _authConfirmPasswordInput.Text = string.Empty;
+                _authConfirmPasswordInput.IsVisible = false;
+            }
             if (_authFeedbackLabel != null) _authFeedbackLabel.Text = "Sesión cerrada.";
             NavigateToScreen(ScreenState.AuthScreen);
         }
 
         private async void OnDeleteAccountClicked()
         {
-            string displayUser = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : "Invitado";
+            if (IsGuestUser)
+            {
+                return;
+            }
+
+            string displayUser = _authenticatedUsername;
             bool confirm = await DisplayAlert(
                 "Eliminar cuenta",
                 $"¿Deseas eliminar permanentemente la cuenta '{displayUser}' y sus estadísticas?",
@@ -2079,7 +2146,7 @@ namespace FractalTicTacToe.Maui
                 ? _authenticatedPassword
                 : (_authPasswordInput?.Text ?? string.Empty);
 
-            if (!string.IsNullOrEmpty(_authenticatedUsername) && _authenticatedUsername != "Invitado")
+            if (!string.IsNullOrEmpty(_authenticatedUsername) && !IsGuestUser)
             {
                 _localAuthStore.DeleteAccount(_authenticatedUsername, pass, out _);
                 SaveLocalAccountsToDisk();
@@ -2092,10 +2159,16 @@ namespace FractalTicTacToe.Maui
 
             ClearSavedSessionFromDisk();
             _onlineClient.Disconnect();
+            _onlineClient.ResetLocalProfile("Invitado");
             _authenticatedUsername = string.Empty;
             _authenticatedPassword = string.Empty;
             if (_authUsernameInput != null) _authUsernameInput.Text = string.Empty;
             if (_authPasswordInput != null) _authPasswordInput.Text = string.Empty;
+            if (_authConfirmPasswordInput != null)
+            {
+                _authConfirmPasswordInput.Text = string.Empty;
+                _authConfirmPasswordInput.IsVisible = false;
+            }
             if (_authFeedbackLabel != null)
             {
                 _authFeedbackLabel.Text = "Cuenta eliminada.";
@@ -2380,7 +2453,7 @@ namespace FractalTicTacToe.Maui
                 Player myRole = room.AssignedRole != Player.None ? room.AssignedRole : Player.X;
                 bool isMyTurn = room.State.CurrentPlayer == myRole;
                 string turnText = isMyTurn ? "Tu turno" : $"Turno de {oppName}";
-                string summary = $"En línea vs {oppName} ({room.Clock.Config.Name})\nJugada {room.State.MoveCount} • {turnText}";
+                string summary = $"En línea vs {oppName} • {room.Clock.Config.Name}\nJugada {room.State.MoveCount} • {turnText}";
 
                 var row = new Grid
                 {
@@ -2412,8 +2485,8 @@ namespace FractalTicTacToe.Maui
                 GameSessionController targetSession = localSess;
                 bool isVsAi = targetSession.Mode == SessionMode.HumanVsBotX || targetSession.Mode == SessionMode.BotVsHumanO;
                 string modeDesc = isVsAi
-                    ? $"Contra IA ({FormatDifficultyLabel(targetSession.BotDifficulty)})"
-                    : $"2 Jugadores ({targetSession.Clock.Config.Name})";
+                    ? $"Contra IA • {FormatDifficultyLabel(targetSession.BotDifficulty)}"
+                    : $"2 Jugadores • {targetSession.Clock.Config.Name}";
                 string summary = $"{modeDesc}\nJugada {targetSession.State.MoveCount} • Turno de [{targetSession.State.CurrentPlayer}]";
 
                 var row = new Grid
@@ -2468,15 +2541,47 @@ namespace FractalTicTacToe.Maui
             }
         }
 
-        private void RecordCompletedMatchIfNeeded(MatchRecord record)
+        private void OnOnlineHistoricalMatchSynced(MatchRecord record)
         {
-            if (record == null || record.MatchId == _lastRecordedMatchId || string.IsNullOrWhiteSpace(record.MoveTranscript))
+            if (record == null || string.IsNullOrWhiteSpace(record.MoveTranscript))
                 return;
+
+            Dispatcher.Dispatch(() =>
+            {
+                RecordCompletedMatchIfNeeded(record, sortByDate: true);
+            });
+        }
+
+        private void RecordCompletedMatchIfNeeded(MatchRecord record, bool sortByDate = false)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.MoveTranscript))
+                return;
+
+            for (int i = 0; i < _recordedMatches.Count; i++)
+            {
+                MatchRecord existing = _recordedMatches[i];
+                if (existing == null) continue;
+                if (string.Equals(existing.MatchId, record.MatchId, StringComparison.Ordinal) ||
+                    (string.Equals(existing.PlayerXName, record.PlayerXName, StringComparison.OrdinalIgnoreCase) &&
+                     string.Equals(existing.PlayerOName, record.PlayerOName, StringComparison.OrdinalIgnoreCase) &&
+                     string.Equals(existing.MoveTranscript, record.MoveTranscript, StringComparison.Ordinal) &&
+                     Math.Abs((existing.PlayedAtUtc - record.PlayedAtUtc).TotalMinutes) < 2.0))
+                {
+                    return;
+                }
+            }
 
             _lastRecordedMatchId = record.MatchId;
             _recordedMatches.Insert(0, record);
+            if (sortByDate)
+            {
+                _recordedMatches.Sort((a, b) => b.PlayedAtUtc.CompareTo(a.PlayedAtUtc));
+            }
             SaveRecordedMatchesToDisk();
-            _replayNavigator = new MatchReplayNavigator(record);
+            if (_replayNavigator == null || !sortByDate)
+            {
+                _replayNavigator = new MatchReplayNavigator(_recordedMatches[0]);
+            }
             PopulateMatchSelectorDropdown();
         }
 
@@ -2510,7 +2615,7 @@ namespace FractalTicTacToe.Maui
                 MatchRecord m = _filteredAnalysisMatches[i];
                 string winnerTag = m.Winner == Player.None ? "Empate" : $"Ganó {m.Winner}";
                 string dateTag = m.PlayedAtUtc.ToLocalTime().ToString("dd/MM HH:mm");
-                _matchSelectorPicker.Items.Add($"#{i + 1} ({dateTag}): {m.PlayerXName} vs {m.PlayerOName} • {winnerTag}");
+                _matchSelectorPicker.Items.Add($"#{i + 1} • {dateTag} • {m.PlayerXName} vs {m.PlayerOName} • {winnerTag}");
             }
 
             _matchSelectorPicker.SelectedIndex = 0;
@@ -2553,7 +2658,7 @@ namespace FractalTicTacToe.Maui
                     {
                         _leaderboardListContainer.Add(new Label
                         {
-                            Text = $"#{fields[0]}  {fields[1]} — {fields[2]} pts ({fields[3]}) [{fields[4]}]",
+                            Text = $"#{fields[0]}  {fields[1]} — {fields[2]} pts • {fields[3]} • {fields[4]}",
                             FontSize = 13,
                             TextColor = Colors.White
                         });
@@ -2585,11 +2690,11 @@ namespace FractalTicTacToe.Maui
 
             _topHeaderSubtitleLabel.Text = _currentScreen == ScreenState.AuthScreen
                 ? "Acceso"
-                : $"{displayUser} • {activeTc.CategoryDisplayName}: {modeRating} pts ({onlineRank})";
+                : $"{displayUser} • {activeTc.CategoryDisplayName}: {modeRating} pts • {onlineRank}";
 
             _lobbyProfileSummaryLabel.Text = displayUser;
             _lobbyLeagueBadgeLabel.Text =
-                $"Bullet {_onlineClient.LocalBulletElo} • Blitz {_onlineClient.LocalBlitzElo} • Rápida {_onlineClient.LocalRapidElo}\n" +
+                $"1+1: {_onlineClient.LocalBulletElo} • 3+0: {_onlineClient.LocalBlitz3Plus0Elo} • 3+2: {_onlineClient.LocalBlitz3Plus2Elo} • 5+0: {_onlineClient.LocalRapidElo}\n" +
                 $"Liga {onlineRank} • {_onlineClient.LocalWins}V {_onlineClient.LocalLosses}D {_onlineClient.LocalDraws}E";
 
             RefreshActiveMatchesCardUI();
@@ -2640,7 +2745,7 @@ namespace FractalTicTacToe.Maui
                 oppDelta = oppRole == Player.X ? upd.DeltaX : upd.DeltaO;
             }
 
-            _leftPlayerTitleLabel.Text = $"[{myRole}] {myName} (Tú)";
+            _leftPlayerTitleLabel.Text = $"[{myRole}] {myName}";
             _leftPlayerTitleLabel.TextColor = myColor;
             ConfigureOnlineRatingLabel(_leftPlayerRatingLabel, _onlineClient.LocalElo, _onlineClient.LocalRankTitle, myDelta);
 
@@ -2670,15 +2775,15 @@ namespace FractalTicTacToe.Maui
                 }
                 else if (state.Winner == myRole)
                 {
-                    _statusBannerLabel.Text = $"Ganaste ({reasonText})";
+                    _statusBannerLabel.Text = $"Ganaste • {reasonText}";
                 }
                 else if (state.Winner == oppRole)
                 {
-                    _statusBannerLabel.Text = $"Ganó {oppName} ({reasonText})";
+                    _statusBannerLabel.Text = $"Ganó {oppName} • {reasonText}";
                 }
                 else
                 {
-                    _statusBannerLabel.Text = $"Empate ({reasonText})";
+                    _statusBannerLabel.Text = $"Empate • {reasonText}";
                 }
             }
             else if (_onlineClient.IsWaitingForOpponentTakebackResponse)
@@ -2973,13 +3078,13 @@ namespace FractalTicTacToe.Maui
                 }
 
                 _analysisStepInfoLabel.Text =
-                    $"Jugada {_replayNavigator.CurrentPly}/{_replayNavigator.TotalPlies} ([{mover}]): {explanation}";
+                    $"Jugada {_replayNavigator.CurrentPly}/{_replayNavigator.TotalPlies} • {mover}: {explanation}";
             }
             else
             {
                 _evalScoreLabel.Text = posStatus;
                 _evalScoreLabel.TextColor = Colors.White;
-                _analysisStepInfoLabel.Text = $"Inicio (0/{_replayNavigator.TotalPlies}) • Avanza con los botones";
+                _analysisStepInfoLabel.Text = $"Inicio 0/{_replayNavigator.TotalPlies} • Avanza con los botones";
             }
 
             _stepStartBtn.IsEnabled = _replayNavigator.CanStepBackward;
@@ -3001,11 +3106,16 @@ namespace FractalTicTacToe.Maui
 
             _profileNameLabel.Text = name;
             _profileRatingBigLabel.Text =
-                $"Bullet: {_onlineClient.LocalBulletElo} • Blitz: {_onlineClient.LocalBlitzElo} • Rápida: {_onlineClient.LocalRapidElo}\n" +
-                $"Liga {rank}";
+                $"Bullet 1+1: {_onlineClient.LocalBulletElo} • Blitz 3+0: {_onlineClient.LocalBlitz3Plus0Elo}\n" +
+                $"Blitz 3+2: {_onlineClient.LocalBlitz3Plus2Elo} • Rápida 5+0: {_onlineClient.LocalRapidElo} • Liga {rank}";
             _profileStatsGridLabel.Text =
                 $"En línea: {totalOnline} | Victorias: {wins} | Derrotas: {losses} | Empates: {draws}\n" +
                 $"Efectividad: {winRate:F0}% | Partidas guardadas: {_recordedMatches.Count}";
+
+            if (_deleteAccountBtn != null)
+            {
+                _deleteAccountBtn.IsVisible = !IsGuestUser;
+            }
         }
 
         private void UpdateClockLabels()
@@ -3373,11 +3483,11 @@ namespace FractalTicTacToe.Maui
             try
             {
                 string user = !string.IsNullOrEmpty(_authenticatedUsername) ? _authenticatedUsername : _onlineClient.LocalUsername;
-                if (string.IsNullOrWhiteSpace(user)) return;
+                if (string.IsNullOrWhiteSpace(user) || string.Equals(user, "Invitado", StringComparison.OrdinalIgnoreCase)) return;
                 string file = Path.Combine(GetAuthDataDir(), "saved_profile_cache.txt");
                 string line =
-                    $"{user}\t{_onlineClient.LocalElo}\t{_onlineClient.LocalBulletElo}\t{_onlineClient.LocalBlitzElo}\t{_onlineClient.LocalRapidElo}\t" +
-                    $"{_onlineClient.LocalWins}\t{_onlineClient.LocalLosses}\t{_onlineClient.LocalDraws}";
+                    $"{user}\t{_onlineClient.LocalElo}\t{_onlineClient.LocalBulletElo}\t{_onlineClient.LocalBlitz3Plus2Elo}\t{_onlineClient.LocalRapidElo}\t" +
+                    $"{_onlineClient.LocalWins}\t{_onlineClient.LocalLosses}\t{_onlineClient.LocalDraws}\t{_onlineClient.LocalBlitz3Plus0Elo}";
                 File.WriteAllText(file, line);
             }
             catch { }
@@ -3404,8 +3514,9 @@ namespace FractalTicTacToe.Maui
                 int.TryParse(cols[5], out int wins);
                 int.TryParse(cols[6], out int losses);
                 int.TryParse(cols[7], out int draws);
+                int z0Elo = cols.Length >= 9 && int.TryParse(cols[8], out int parsedZ0) ? parsedZ0 : zElo;
 
-                _onlineClient.LoadCachedProfile(cols[0], elo, bElo, zElo, rElo, wins, losses, draws);
+                _onlineClient.LoadCachedProfile(cols[0], elo, bElo, zElo, rElo, wins, losses, draws, z0Elo);
                 return true;
             }
             catch
@@ -3496,7 +3607,7 @@ namespace FractalTicTacToe.Maui
             if (delta.HasValue)
             {
                 string sign = delta.Value >= 0 ? "+" : "";
-                label.Text = $"{rating} pts ({sign}{delta.Value}) • {rankTitle}";
+                label.Text = $"{rating} pts {sign}{delta.Value} • {rankTitle}";
                 label.TextColor = delta.Value >= 0 ? PositiveDeltaColor : NegativeDeltaColor;
             }
             else

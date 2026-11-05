@@ -48,8 +48,8 @@ namespace FractalTicTacToe.Core
             IsActive = true;
             CurrentStep = 1;
             TargetHintMove = new Move(4, 0);
-            StepInstruction = "Toca la casilla morada (Gato central, esquina superior izquierda) para enviar al rival al gato de arriba a la izquierda.";
-            GameLogger.Info("TUTORIAL", "Tutorial interactivo iniciado (Paso 1/3).");
+            StepInstruction = "Toca la casilla morada en el gato central, esquina superior izquierda, para enviar al rival al gato de arriba a la izquierda.";
+            GameLogger.Info("TUTORIAL", "Tutorial interactivo iniciado: Paso 1/3.");
         }
 
         /// <summary>
@@ -81,7 +81,7 @@ namespace FractalTicTacToe.Core
             {
                 if (boardIndex != 4 || cellIndex != 0)
                 {
-                    StepInstruction = "Paso 1: Toca la casilla con borde morado (Gato central, esquina superior izquierda).";
+                    StepInstruction = "Paso 1: Toca la casilla con borde morado en el gato central, esquina superior izquierda.";
                     return false;
                 }
 
@@ -89,7 +89,7 @@ namespace FractalTicTacToe.Core
                 BoardState.MakeMove(new Move(0, 4));
                 CurrentStep = 2;
                 TargetHintMove = new Move(4, 1);
-                StepInstruction = "El rival tiró en su centro y te regresó al gato central. Toca la casilla morada (arriba al centro) para armar 2 en línea.";
+                StepInstruction = "El rival tiró en su centro y te regresó al gato central. Toca la casilla morada arriba al centro para armar 2 en línea.";
                 GameLogger.Info("TUTORIAL", "Paso 1 completado -> Avanzando a Paso 2/3.");
                 return true;
             }
@@ -98,7 +98,7 @@ namespace FractalTicTacToe.Core
             {
                 if (boardIndex != 4 || cellIndex != 1)
                 {
-                    StepInstruction = "Paso 2: Toca la casilla con borde morado (Gato central, arriba al centro).";
+                    StepInstruction = "Paso 2: Toca la casilla con borde morado en el gato central, arriba al centro.";
                     return false;
                 }
 
@@ -115,7 +115,7 @@ namespace FractalTicTacToe.Core
             {
                 if (boardIndex != 4 || cellIndex != 2)
                 {
-                    StepInstruction = "Paso 3: Toca la casilla con borde morado (Gato central, esquina superior derecha) para ganar.";
+                    StepInstruction = "Paso 3: Toca la casilla con borde morado en el gato central, esquina superior derecha, para ganar.";
                     return false;
                 }
 

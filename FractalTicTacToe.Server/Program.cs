@@ -650,6 +650,17 @@ namespace FractalTicTacToe.Server
                     Console.WriteLine($"[PARTIDA ACTIVA SINCRONIZADA] {profile.Username} mantiene activa la sala {activeRoom.RoomId} como [{role}].");
                 }
             }
+
+            // Sincronizar el historial de partidas concluidas del jugador almacenadas en el servidor
+            List<MatchRecord> pastMatches = Matchmaking.GetPlayerMatchHistory(profile.Username, 50);
+            for (int i = pastMatches.Count - 1; i >= 0; i--)
+            {
+                MatchRecord rec = pastMatches[i];
+                if (rec != null && rec.EndReason != MatchEndReason.Aborted && !string.IsNullOrWhiteSpace(rec.MoveTranscript))
+                {
+                    sender.Send(MultiplayerProtocol.BuildMatchRecordSync(rec));
+                }
+            }
         }
 
         private static void BindRoomEventsAndNotifyStart(OnlineMatchRoom room)

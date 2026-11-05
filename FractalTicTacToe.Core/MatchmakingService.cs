@@ -594,7 +594,7 @@ namespace FractalTicTacToe.Core
                 foreach (PlayerProfile p in _accountsById.Values)
                 {
                     sbAccounts.AppendLine(
-                        $"{p.PlayerId}\t{p.Username}\t{p.EloRating}\t{p.Wins}\t{p.Losses}\t{p.Draws}\t{p.PasswordHash}\t{p.BulletElo}\t{p.BlitzElo}\t{p.RapidElo}");
+                        $"{p.PlayerId}\t{p.Username}\t{p.EloRating}\t{p.Wins}\t{p.Losses}\t{p.Draws}\t{p.PasswordHash}\t{p.BulletElo}\t{p.Blitz3Plus2Elo}\t{p.RapidElo}\t{p.Blitz3Plus0Elo}");
                 }
                 File.WriteAllText(accountsFile, sbAccounts.ToString(), Encoding.UTF8);
 
@@ -642,8 +642,9 @@ namespace FractalTicTacToe.Core
                             Draws = int.TryParse(cols[5], out int d) ? d : 0,
                             PasswordHash = cols.Length >= 7 ? cols[6] : string.Empty,
                             BulletElo = cols.Length >= 8 && int.TryParse(cols[7], out int bElo) ? bElo : baseElo,
-                            BlitzElo = cols.Length >= 9 && int.TryParse(cols[8], out int zElo) ? zElo : baseElo,
-                            RapidElo = cols.Length >= 10 && int.TryParse(cols[9], out int rElo) ? rElo : baseElo
+                            Blitz3Plus2Elo = cols.Length >= 9 && int.TryParse(cols[8], out int zElo) ? zElo : baseElo,
+                            RapidElo = cols.Length >= 10 && int.TryParse(cols[9], out int rElo) ? rElo : baseElo,
+                            Blitz3Plus0Elo = cols.Length >= 11 && int.TryParse(cols[10], out int z0Elo) ? z0Elo : baseElo
                         };
 
                         _accountsById[profile.PlayerId] = profile;

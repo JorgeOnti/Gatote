@@ -4,14 +4,16 @@ using System.Globalization;
 namespace FractalTicTacToe.Core
 {
     /// <summary>
-    /// Categoría competitiva de control de tiempo para puntuación independiente por modo de juego.
+    /// Categoría competitiva de control de tiempo para puntuación independiente por cada una de las 4 categorías.
     /// </summary>
     public enum TimeControlCategory
     {
         Bullet = 0,
-        Blitz = 1,
-        Rapid = 2,
-        Untimed = 3
+        Blitz3Plus0 = 1,
+        Blitz3Plus2 = 2,
+        Rapid = 3,
+        Untimed = 4,
+        Blitz = Blitz3Plus2
     }
 
 #if NET6_0_OR_GREATER
@@ -31,7 +33,12 @@ namespace FractalTicTacToe.Core
             {
                 if (IsUntimed) return TimeControlCategory.Untimed;
                 if (InitialSeconds < 180.0) return TimeControlCategory.Bullet;
-                if (InitialSeconds < 300.0) return TimeControlCategory.Blitz;
+                if (InitialSeconds < 300.0)
+                {
+                    return IncrementSeconds <= 0.0
+                        ? TimeControlCategory.Blitz3Plus0
+                        : TimeControlCategory.Blitz3Plus2;
+                }
                 return TimeControlCategory.Rapid;
             }
         }
@@ -42,9 +49,10 @@ namespace FractalTicTacToe.Core
             {
                 switch (Category)
                 {
-                    case TimeControlCategory.Bullet: return "Bullet";
-                    case TimeControlCategory.Blitz: return "Blitz";
-                    case TimeControlCategory.Rapid: return "Rápida";
+                    case TimeControlCategory.Bullet: return "Bullet 1+1";
+                    case TimeControlCategory.Blitz3Plus0: return "Blitz 3+0";
+                    case TimeControlCategory.Blitz3Plus2: return "Blitz 3+2";
+                    case TimeControlCategory.Rapid: return "Rápida 5+0";
                     default: return "Sin Tiempo";
                 }
             }
@@ -115,7 +123,12 @@ namespace FractalTicTacToe.Core
             {
                 if (IsUntimed) return TimeControlCategory.Untimed;
                 if (InitialSeconds < 180.0) return TimeControlCategory.Bullet;
-                if (InitialSeconds < 300.0) return TimeControlCategory.Blitz;
+                if (InitialSeconds < 300.0)
+                {
+                    return IncrementSeconds <= 0.0
+                        ? TimeControlCategory.Blitz3Plus0
+                        : TimeControlCategory.Blitz3Plus2;
+                }
                 return TimeControlCategory.Rapid;
             }
         }
@@ -126,9 +139,10 @@ namespace FractalTicTacToe.Core
             {
                 switch (Category)
                 {
-                    case TimeControlCategory.Bullet: return "Bullet";
-                    case TimeControlCategory.Blitz: return "Blitz";
-                    case TimeControlCategory.Rapid: return "Rápida";
+                    case TimeControlCategory.Bullet: return "Bullet 1+1";
+                    case TimeControlCategory.Blitz3Plus0: return "Blitz 3+0";
+                    case TimeControlCategory.Blitz3Plus2: return "Blitz 3+2";
+                    case TimeControlCategory.Rapid: return "Rápida 5+0";
                     default: return "Sin Tiempo";
                 }
             }

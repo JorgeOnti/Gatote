@@ -943,7 +943,7 @@ namespace FractalTicTacToe.Core
 
             if (playedMove.Equals(best.BestMove))
             {
-                explanation = $"Mejor opción: juega en cuadro {playedMove.BoardIndex + 1} y envía al rival a un cuadro seguro ({playedMove.CellIndex + 1}).";
+                explanation = $"Mejor opción: juega en el cuadro {playedMove.BoardIndex + 1} y envía al rival al cuadro seguro {playedMove.CellIndex + 1}.";
                 return "Muy buen movimiento";
             }
 

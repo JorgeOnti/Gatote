@@ -961,34 +961,55 @@ namespace CoreTests
 
         private static void TestPerModeRatingsCustomClockAndDateFilteredHistory()
         {
-            // 1. Puntuación separada por modo de juego (Bullet, Blitz, Rápida)
+            // 1. Puntuación separada en 4 categorías independientes (Bullet 1+1, Blitz 3+0, Blitz 3+2, Rápida 5+0)
             var mm = new MatchmakingService();
             Assert(mm.RegisterAccount("ModePlayerX", "pass1234", out PlayerProfile px, out _), "Registro ModePlayerX.");
             Assert(mm.RegisterAccount("ModePlayerO", "pass1234", out PlayerProfile po, out _), "Registro ModePlayerO.");
 
-            Assert(px.BulletElo == 1200 && px.BlitzElo == 1200 && px.RapidElo == 1200,
-                "Los 3 modos deben iniciar en 1200 puntos.");
+            Assert(px.BulletElo == 1200 && px.Blitz3Plus0Elo == 1200 && px.Blitz3Plus2Elo == 1200 && px.RapidElo == 1200,
+                "Las 4 categorías deben iniciar en 1200 puntos.");
 
             // Jugar una partida en modo Bullet 1+1 donde gana X por rendición de O (tras realizar el primer tiro)
             var bulletRoom = new OnlineMatchRoom("ROOM-BULLET-1", px, po, TimeControlConfig.Bullet1Plus1);
             Assert(bulletRoom.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento en sala Bullet.");
             Assert(bulletRoom.Resign(po.PlayerId, out _), "Rendición en sala Bullet.");
             Assert(px.BulletElo > 1200 && po.BulletElo < 1200,
-                "El puntaje Bullet debe cambiar tras una partida Bullet.");
-            Assert(px.BlitzElo == 1200 && px.RapidElo == 1200,
-                "Los puntajes Blitz y Rápida NO deben verse afectados por una partida Bullet.");
+                "El puntaje Bullet 1+1 debe cambiar tras una partida Bullet.");
+            Assert(px.Blitz3Plus0Elo == 1200 && px.Blitz3Plus2Elo == 1200 && px.RapidElo == 1200,
+                "Los puntajes Blitz 3+0, Blitz 3+2 y Rápida 5+0 NO deben verse afectados por una partida Bullet.");
+
+            // Jugar una partida en modo Blitz 3+0 donde gana X por rendición de O
+            var blitz30Room = new OnlineMatchRoom("ROOM-BLITZ30-1", px, po, TimeControlConfig.Blitz3Plus0);
+            int bulletBefore30 = px.BulletElo;
+            Assert(blitz30Room.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento en sala Blitz 3+0.");
+            Assert(blitz30Room.Resign(po.PlayerId, out _), "Rendición en sala Blitz 3+0.");
+            Assert(px.Blitz3Plus0Elo > 1200 && po.Blitz3Plus0Elo < 1200,
+                "El puntaje Blitz 3+0 debe actualizarse independientemente.");
+            Assert(px.Blitz3Plus2Elo == 1200 && px.BulletElo == bulletBefore30 && px.RapidElo == 1200,
+                "Blitz 3+2 NO debe cambiar cuando se juega Blitz 3+0.");
+
+            // Jugar una partida en modo Blitz 3+2 donde gana O por rendición de X
+            var blitz32Room = new OnlineMatchRoom("ROOM-BLITZ32-1", px, po, TimeControlConfig.Blitz3Plus2);
+            int blitz30Before32 = px.Blitz3Plus0Elo;
+            Assert(blitz32Room.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento en sala Blitz 3+2.");
+            Assert(blitz32Room.Resign(px.PlayerId, out _), "Rendición en sala Blitz 3+2.");
+            Assert(px.Blitz3Plus2Elo < 1200 && po.Blitz3Plus2Elo > 1200,
+                "El puntaje Blitz 3+2 debe actualizarse independientemente.");
+            Assert(px.Blitz3Plus0Elo == blitz30Before32,
+                "Blitz 3+0 debe permanecer intacto tras una partida Blitz 3+2.");
 
             // Jugar una partida en modo Rápida 5+0 donde gana O por rendición de X
             var rapidRoom = new OnlineMatchRoom("ROOM-RAPID-1", px, po, TimeControlConfig.Rapid5Plus0);
             int bulletBeforeRapid = px.BulletElo;
+            int blitz32BeforeRapid = px.Blitz3Plus2Elo;
             Assert(rapidRoom.SubmitMove(px.PlayerId, new Move(4, 4), out _), "Primer movimiento en sala Rápida.");
             Assert(rapidRoom.Resign(px.PlayerId, out _), "Rendición en sala Rápida.");
             Assert(px.RapidElo < 1200 && po.RapidElo > 1200,
-                "El puntaje Rápida debe actualizarse independientemente.");
-            Assert(px.BulletElo == bulletBeforeRapid && px.BlitzElo == 1200,
-                "Bullet y Blitz deben permanecer intactos tras la partida Rápida.");
+                "El puntaje Rápida 5+0 debe actualizarse independientemente.");
+            Assert(px.BulletElo == bulletBeforeRapid && px.Blitz3Plus0Elo == blitz30Before32 && px.Blitz3Plus2Elo == blitz32BeforeRapid,
+                "Bullet 1+1, Blitz 3+0 y Blitz 3+2 deben permanecer intactos tras la partida Rápida.");
 
-            // Verificar persistencia en disco de los 3 puntajes (BulletElo, BlitzElo, RapidElo)
+            // Verificar persistencia en disco de los 4 puntajes (BulletElo, Blitz3Plus0Elo, Blitz3Plus2Elo, RapidElo)
             string tempDir = Path.Combine(Path.GetTempPath(), "FractalModeRatings_" + Guid.NewGuid().ToString("N"));
             try
             {
@@ -997,30 +1018,68 @@ namespace CoreTests
                 mmLoaded.LoadFromDirectory(tempDir);
                 Assert(mmLoaded.AuthenticateAccount("ModePlayerX", "pass1234", out PlayerProfile loadedX, out _),
                     "Debe autenticar ModePlayerX tras recargar de disco.");
-                Assert(loadedX.BulletElo == px.BulletElo && loadedX.BlitzElo == px.BlitzElo && loadedX.RapidElo == px.RapidElo,
-                    "Los puntajes por modo (Bullet, Blitz, Rápida) deben persistirse y cargarse exactamente igual.");
+                Assert(loadedX.BulletElo == px.BulletElo &&
+                       loadedX.Blitz3Plus0Elo == px.Blitz3Plus0Elo &&
+                       loadedX.Blitz3Plus2Elo == px.Blitz3Plus2Elo &&
+                       loadedX.RapidElo == px.RapidElo,
+                    "Los 4 puntajes por categoría deben persistirse y cargarse exactamente igual.");
             }
             finally
             {
                 if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
             }
 
-            // Verificar que el cliente carga caché instantáneo de perfil (sin parpadear en 1200) y sincroniza AUTH_OK con los 3 modos
+            // Verificar caché de perfil, sincronización AUTH_OK con las 4 categorías, limpieza en Modo Invitado y sincronización de partidas históricas
             using (var client = new OnlineMultiplayerClient())
             {
-                client.LoadCachedProfile("ModePlayerX", 1310, 1420, 1310, 1180, 12, 5, 2);
+                client.LoadCachedProfile("ModePlayerX", 1350, 1420, 1310, 1180, 12, 5, 2, 1350);
                 Assert(client.LocalUsername == "ModePlayerX" &&
                        client.LocalBulletElo == 1420 &&
-                       client.LocalBlitzElo == 1310 &&
+                       client.LocalBlitz3Plus0Elo == 1350 &&
+                       client.LocalBlitz3Plus2Elo == 1310 &&
                        client.LocalRapidElo == 1180,
-                    "LoadCachedProfile debe precargar los puntajes reales antes de terminar la pantalla Splash.");
+                    "LoadCachedProfile debe precargar los 4 puntajes reales antes de terminar la pantalla Splash.");
 
                 string authOkPacket = MultiplayerProtocol.BuildAuthOk(px);
                 client.ProcessServerPacket(authOkPacket);
                 Assert(client.LocalBulletElo == px.BulletElo &&
-                       client.LocalBlitzElo == px.BlitzElo &&
+                       client.LocalBlitz3Plus0Elo == px.Blitz3Plus0Elo &&
+                       client.LocalBlitz3Plus2Elo == px.Blitz3Plus2Elo &&
                        client.LocalRapidElo == px.RapidElo,
-                    "AUTH_OK debe sincronizar los 3 puntajes por modo en el cliente.");
+                    "AUTH_OK debe sincronizar los 4 puntajes por categoría en el cliente.");
+
+                // Verificar que al cerrar sesión y entrar en Modo Invitado se reinician por completo las estadísticas de la sesión pasada
+                client.ResetLocalProfile("Invitado");
+                Assert(client.LocalUsername == "Invitado" &&
+                       client.LocalBulletElo == 1200 &&
+                       client.LocalBlitz3Plus0Elo == 1200 &&
+                       client.LocalBlitz3Plus2Elo == 1200 &&
+                       client.LocalRapidElo == 1200 &&
+                       client.LocalWins == 0 &&
+                       client.LocalLosses == 0 &&
+                       client.LocalDraws == 0,
+                    "ResetLocalProfile('Invitado') debe limpiar todas las estadísticas y regresar las 4 puntuaciones a 1200.");
+
+                // Verificar sincronización de partidas históricas guardadas en el servidor (MATCH_RECORD_SYNC)
+                MatchRecord syncedMatch = null;
+                client.HistoricalMatchSynced += r => syncedMatch = r;
+                var serverStoredRecord = new MatchRecord
+                {
+                    MatchId = "SRV-HIST-001",
+                    PlayedAtUtc = new DateTime(2026, 10, 19, 20, 30, 0, DateTimeKind.Utc),
+                    PlayerXName = "ModePlayerX",
+                    PlayerOName = "AmigoRival",
+                    Winner = Player.X,
+                    EndReason = MatchEndReason.SuddenDeathThreeInARow,
+                    MoveTranscript = "B4C4 B4C0 B0C0"
+                };
+                client.ProcessServerPacket(MultiplayerProtocol.BuildMatchRecordSync(serverStoredRecord));
+                Assert(syncedMatch != null &&
+                       syncedMatch.MatchId == "SRV-HIST-001" &&
+                       syncedMatch.PlayerXName == "ModePlayerX" &&
+                       syncedMatch.PlayerOName == "AmigoRival" &&
+                       syncedMatch.MoveTranscript == "B4C4 B4C0 B0C0",
+                    "MATCH_RECORD_SYNC debe restaurar las partidas jugadas previamente en el servidor hacia el cliente.");
             }
 
             // 2. Reloj personalizado para 2 jugadores (minutos + incremento y sin tiempo)
@@ -1038,32 +1097,32 @@ namespace CoreTests
             Assert(Math.Abs(clampedClock.InitialSeconds - 180.0 * 60.0) < 0.01 && Math.Abs(clampedClock.IncrementSeconds - 60.0) < 0.01,
                 "CreateCustom debe limitar valores superiores al máximo a 180 min y 60 seg.");
 
-            // 3. Persistencia de partidas en disco y filtrado por fecha (Hoy, Última Semana, Último Mes, Todas)
-            DateTime nowUtc = new DateTime(2026, 10, 27, 15, 0, 0, DateTimeKind.Utc);
+            // 3. Persistencia de partidas en disco y filtrado por fecha (Hoy, Semana, Mes calendario actual = Noviembre, Todas)
+            DateTime nowUtc = new DateTime(2026, 11, 5, 18, 0, 0, DateTimeKind.Utc);
             var recToday = new MatchRecord
             {
-                MatchId = "M-TODAY",
-                PlayedAtUtc = nowUtc.AddHours(-2),
+                MatchId = "M-TODAY-NOV5",
+                PlayedAtUtc = nowUtc.AddHours(-2), // 5 de noviembre
                 PlayerXName = "UserA",
                 PlayerOName = "UserB",
                 Winner = Player.X,
                 EndReason = MatchEndReason.SuddenDeathThreeInARow,
                 MoveTranscript = "B4C4 B4C0 B0C0"
             };
-            var recFourDaysAgo = new MatchRecord
+            var recNov2 = new MatchRecord
             {
-                MatchId = "M-WEEK",
-                PlayedAtUtc = nowUtc.AddDays(-4),
+                MatchId = "M-NOV2",
+                PlayedAtUtc = new DateTime(2026, 11, 2, 16, 0, 0, DateTimeKind.Utc), // 2 de noviembre (mismo mes y última semana)
                 PlayerXName = "UserA",
                 PlayerOName = "UserC",
                 Winner = Player.X,
                 EndReason = MatchEndReason.SuddenDeathThreeInARow,
                 MoveTranscript = "B4C4 B4C0 B0C0"
             };
-            var recTwentyDaysAgo = new MatchRecord
+            var recOct25 = new MatchRecord
             {
-                MatchId = "M-MONTH",
-                PlayedAtUtc = nowUtc.AddDays(-20),
+                MatchId = "M-OCT25",
+                PlayedAtUtc = new DateTime(2026, 10, 25, 16, 0, 0, DateTimeKind.Utc), // 25 de octubre (hace 11 días, pero de OCTUBRE)
                 PlayerXName = "UserA",
                 PlayerOName = "UserD",
                 Winner = Player.O,
@@ -1081,22 +1140,27 @@ namespace CoreTests
                 MoveTranscript = "B4C4 B4C0"
             };
 
-            var allMatches = new System.Collections.Generic.List<MatchRecord> { recToday, recFourDaysAgo, recTwentyDaysAgo, recOld };
+            var allMatches = new System.Collections.Generic.List<MatchRecord> { recToday, recNov2, recOct25, recOld };
 
             string historyFile = Path.Combine(Path.GetTempPath(), "recorded_matches_" + Guid.NewGuid().ToString("N") + ".pgn");
             try
             {
                 MatchRecord.SaveHistoryToFile(historyFile, allMatches);
                 var diskMatches = MatchRecord.LoadHistoryFromFile(historyFile);
-                Assert(diskMatches.Count == 4 && diskMatches[0].MatchId == "M-TODAY" && diskMatches[3].MatchId == "M-OLD",
+                Assert(diskMatches.Count == 4 && diskMatches[0].MatchId == "M-TODAY-NOV5" && diskMatches[3].MatchId == "M-OLD",
                     "Las partidas guardadas deben persistir en disco al cerrar y volver a abrir la aplicación.");
 
                 Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.Today, nowUtc).Count == 1,
                     "El filtro 'Hoy' debe devolver solo la partida de hoy (1).");
                 Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.LastWeek, nowUtc).Count == 2,
-                    "El filtro 'Última Semana' debe devolver las partidas de los últimos 7 días (2).");
-                Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.LastMonth, nowUtc).Count == 3,
-                    "El filtro 'Último Mes' debe devolver las partidas de los últimos 30 días (3).");
+                    "El filtro 'Semana' debe devolver las partidas de los últimos 7 días (2).");
+
+                var currentMonthMatches = MatchRecord.FilterByDate(diskMatches, MatchDateFilter.LastMonth, nowUtc);
+                Assert(currentMonthMatches.Count == 2 &&
+                       currentMonthMatches[0].MatchId == "M-TODAY-NOV5" &&
+                       currentMonthMatches[1].MatchId == "M-NOV2",
+                    "El filtro 'Mes' en noviembre debe devolver únicamente las partidas de noviembre (2) y excluir las de octubre.");
+
                 Assert(MatchRecord.FilterByDate(diskMatches, MatchDateFilter.All, nowUtc).Count == 4,
                     "El filtro 'Todas' debe devolver las 4 partidas.");
             }

@@ -54,17 +54,27 @@ namespace FractalTicTacToe.Core
             get => _eloRating;
             set
             {
-                if (BulletElo == _eloRating && BlitzElo == _eloRating && RapidElo == _eloRating)
+                if (BulletElo == _eloRating &&
+                    Blitz3Plus0Elo == _eloRating &&
+                    Blitz3Plus2Elo == _eloRating &&
+                    RapidElo == _eloRating)
                 {
                     BulletElo = value;
-                    BlitzElo = value;
+                    Blitz3Plus0Elo = value;
+                    Blitz3Plus2Elo = value;
                     RapidElo = value;
                 }
                 _eloRating = value;
             }
         }
         public int BulletElo { get; set; }
-        public int BlitzElo { get; set; }
+        public int Blitz3Plus0Elo { get; set; }
+        public int Blitz3Plus2Elo { get; set; }
+        public int BlitzElo
+        {
+            get => Blitz3Plus2Elo;
+            set => Blitz3Plus2Elo = value;
+        }
         public int RapidElo { get; set; }
         public int Wins { get; set; }
         public int Losses { get; set; }
@@ -80,7 +90,8 @@ namespace FractalTicTacToe.Core
             Username = string.IsNullOrWhiteSpace(username) ? "Jugador" : username;
             _eloRating = initialElo;
             BulletElo = initialElo;
-            BlitzElo = initialElo;
+            Blitz3Plus0Elo = initialElo;
+            Blitz3Plus2Elo = initialElo;
             RapidElo = initialElo;
         }
 
@@ -90,8 +101,10 @@ namespace FractalTicTacToe.Core
             {
                 case TimeControlCategory.Bullet:
                     return BulletElo;
-                case TimeControlCategory.Blitz:
-                    return BlitzElo;
+                case TimeControlCategory.Blitz3Plus0:
+                    return Blitz3Plus0Elo;
+                case TimeControlCategory.Blitz3Plus2:
+                    return Blitz3Plus2Elo;
                 case TimeControlCategory.Rapid:
                     return RapidElo;
                 default:
@@ -106,8 +119,11 @@ namespace FractalTicTacToe.Core
                 case TimeControlCategory.Bullet:
                     BulletElo = newRating;
                     break;
-                case TimeControlCategory.Blitz:
-                    BlitzElo = newRating;
+                case TimeControlCategory.Blitz3Plus0:
+                    Blitz3Plus0Elo = newRating;
+                    break;
+                case TimeControlCategory.Blitz3Plus2:
+                    Blitz3Plus2Elo = newRating;
                     break;
                 case TimeControlCategory.Rapid:
                     RapidElo = newRating;
@@ -253,7 +269,7 @@ namespace FractalTicTacToe.Core
         }
 
         public override string ToString() =>
-            $"{Username} [{EloRating} ELO (B:{BulletElo}/Z:{BlitzElo}/R:{RapidElo}) - {RankTitle}] ({Wins}V/{Losses}D/{Draws}E)";
+            $"{Username} [{EloRating} ELO • 1+1:{BulletElo} 3+0:{Blitz3Plus0Elo} 3+2:{Blitz3Plus2Elo} 5+0:{RapidElo} • {RankTitle}] ({Wins}V/{Losses}D/{Draws}E)";
     }
 
     /// <summary>
@@ -507,7 +523,7 @@ namespace FractalTicTacToe.Core
                         }
                         break;
                     case MatchDateFilter.LastMonth:
-                        if (age.TotalDays <= 30.0 && age.TotalDays >= -1.0)
+                        if (playedLocal.Year == nowLocal.Year && playedLocal.Month == nowLocal.Month)
                         {
                             result.Add(rec);
                         }

@@ -42,6 +42,7 @@ namespace FractalTicTacToe.Core
         public const string EvtRematchOffered = "REMATCH_OFFERED";  // REMATCH_OFFERED|<roomId>|<requesterRole>
         public const string EvtRematchDeclined = "REMATCH_DECLINED";// REMATCH_DECLINED|<roomId>|<declinerRole>
         public const string EvtAccountDeleted = "ACCOUNT_DELETED";  // ACCOUNT_DELETED|<username>
+        public const string EvtMatchRecordSync = "MATCH_RECORD_SYNC"; // MATCH_RECORD_SYNC|<matchId>|<dateUtc>|<userX>|<userO>|<eloXBefore>|<eloXAfter>|<eloOBefore>|<eloOAfter>|<winner>|<endReason>|<fen>|<moves>
         public const string EvtError = "ERROR";                     // ERROR|<message>
 
         public static string BuildRegister(string username, string password) =>
@@ -77,7 +78,13 @@ namespace FractalTicTacToe.Core
 
         public static string BuildAuthOk(PlayerProfile profile) =>
             $"{EvtAuthOk}|{profile.PlayerId}|{profile.Username}|{profile.EloRating}|{profile.RankTitle}|" +
-            $"{profile.Wins}|{profile.Losses}|{profile.Draws}|{profile.BulletElo}|{profile.BlitzElo}|{profile.RapidElo}";
+            $"{profile.Wins}|{profile.Losses}|{profile.Draws}|{profile.BulletElo}|{profile.Blitz3Plus2Elo}|{profile.RapidElo}|{profile.Blitz3Plus0Elo}";
+
+        public static string BuildMatchRecordSync(MatchRecord record) =>
+            $"{EvtMatchRecordSync}|{Sanitize(record.MatchId)}|{record.PlayedAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture)}|" +
+            $"{Sanitize(record.PlayerXName)}|{Sanitize(record.PlayerOName)}|{record.PlayerXEloBefore}|{record.PlayerXEloAfter}|" +
+            $"{record.PlayerOEloBefore}|{record.PlayerOEloAfter}|{record.Winner}|{record.EndReason}|" +
+            $"{Sanitize(record.FinalFen)}|{Sanitize(record.MoveTranscript)}";
 
         public static string BuildMatchStart(OnlineMatchRoom room, Player assignedRole) =>
             $"{EvtMatchStart}|{room.RoomId}|{assignedRole}|{room.PlayerX.Username}|{room.PlayerX.GetRatingForTimeControl(room.TimeControl)}|" +
